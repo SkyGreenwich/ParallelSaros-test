@@ -141,7 +141,7 @@ function onInputPs(text) {
   if (cmd.handled) {
     const ps = getPs();
     ps.rt.msg = cmd.reply;
-    ps.pending = mkPending();
+    clearPending(ps);
     return " ";
   }
 
@@ -159,17 +159,18 @@ function onContextPs(text) {
 
 function onOutputPs(text) {
   syncCfg();
-  reconcile();
-
   const ps = getPs();
+  const cycle = classifyTurn(ps);
+  reconcile(cycle);
+
   if (ps.rt.msg) {
     const msg = ps.rt.msg;
     ps.rt.msg = "";
-    ps.pending = mkPending();
+    clearPending(ps);
     return msg;
   }
 
-  return recordTurn(ps, text);
+  return recordTurn(ps, text, cycle);
 }
 
 function getPs() {
@@ -190,6 +191,7 @@ function getPs() {
         secondary: mkRole()
       },
       pending: mkPending(),
+      track: mkTrack(),
       journal: []
     };
   }
@@ -201,8 +203,10 @@ function getPs() {
   ps.roles.primary = ps.roles.primary || mkRole();
   ps.roles.secondary = ps.roles.secondary || mkRole();
   ps.pending = ps.pending || mkPending();
+  ps.track = ps.track || mkTrack();
   ps.journal = Array.isArray(ps.journal) ? ps.journal : [];
   normalizeRt(ps);
+  normalizeTrack(ps);
   return ps;
 }
 
@@ -237,6 +241,28 @@ function mkPending() {
     cooked: "",
     type: "",
     turn: -1
+  };
+}
+
+function mkTrack() {
+  return {
+    pendingRaw: "",
+    pendingNorm: "",
+    pendingType: "",
+    pendingSig: "",
+    pendingTurn: -1,
+    lastType: "",
+    lastText: "",
+    lastSig: "",
+    lastHash: "",
+    lastProbe: "",
+    lastKind: "",
+    lastTurn: -1,
+    retryType: "",
+    retryText: "",
+    retrySig: "",
+    retryKind: "",
+    retryTurn: -1
   };
 }
 
@@ -380,16 +406,44 @@ function normalizeRt(ps) {
   rt.msg = typeof rt.msg === "string" ? rt.msg : "";
 }
 
-function reconcile() {
+function normalizeTrack(ps) {
+  const track = ps.track;
+
+  track.pendingRaw = typeof track.pendingRaw === "string" ? track.pendingRaw : "";
+  track.pendingNorm = typeof track.pendingNorm === "string" ? track.pendingNorm : "";
+  track.pendingType = typeof track.pendingType === "string" ? track.pendingType : "";
+  track.pendingSig = typeof track.pendingSig === "string" ? track.pendingSig : "";
+  track.pendingTurn = sanitizeInt(track.pendingTurn, -1, -1, 999999);
+  track.lastType = typeof track.lastType === "string" ? track.lastType : "";
+  track.lastText = typeof track.lastText === "string" ? track.lastText : "";
+  track.lastSig = typeof track.lastSig === "string" ? track.lastSig : "";
+  track.lastHash = typeof track.lastHash === "string" ? track.lastHash : "";
+  track.lastProbe = typeof track.lastProbe === "string" ? track.lastProbe : "";
+  track.lastKind = typeof track.lastKind === "string" ? track.lastKind : "";
+  track.lastTurn = sanitizeInt(track.lastTurn, -1, -1, 999999);
+  track.retryType = typeof track.retryType === "string" ? track.retryType : "";
+  track.retryText = typeof track.retryText === "string" ? track.retryText : "";
+  track.retrySig = typeof track.retrySig === "string" ? track.retrySig : "";
+  track.retryKind = typeof track.retryKind === "string" ? track.retryKind : "";
+  track.retryTurn = sanitizeInt(track.retryTurn, -1, -1, 999999);
+}
+
+function reconcile(cycleHint) {
   const ps = getPs();
   const turn = getTurn();
-  const type = getType();
-  const rewindTurn = type === "retry" ? turn - 1 : turn;
-  const needsRebuild = ps.rt.lastSeen < 0 || turn < ps.rt.lastSeen || type === "retry";
+  const cycle = cycleHint || classifyTurn(ps);
+  const rewindTurn = cycle.explicitRetry || cycle.implicitRetry ? turn - 1 : turn;
+  const needsRebuild = ps.rt.lastSeen < 0 || turn < ps.rt.lastSeen || cycle.explicitRetry || cycle.implicitRetry;
+
+  if (cycle.explicitRetry || cycle.implicitRetry) {
+    rememberRetryCycle(ps, cycle);
+  } else if (ps.track.retryTurn !== turn) {
+    clearRetryCycle(ps);
+  }
 
   if (!needsRebuild) {
     if (ps.pending.turn > turn) {
-      ps.pending = mkPending();
+      clearPending(ps);
     }
     ps.rt.lastSeen = turn;
     return ps;
@@ -411,7 +465,7 @@ function reconcile() {
   }
 
   if (ps.pending.turn > rewindTurn) {
-    ps.pending = mkPending();
+    clearPending(ps);
   }
 
   ps.rt.lastSeen = turn;
@@ -429,6 +483,14 @@ function restoreRt(ps) {
   ps.rt.lastLogged = -1;
   ps.roles.primary.handoff = last && typeof last.pH === "string" ? last.pH : "";
   ps.roles.secondary.handoff = last && typeof last.sH === "string" ? last.sH : "";
+  ps.track.lastType = last && typeof last.aType === "string" ? last.aType : "";
+  ps.track.lastText = last && typeof last.aText === "string" ? last.aText : "";
+  ps.track.lastSig = last && typeof last.sig === "string" ? last.sig : "";
+  ps.track.lastHash = last && typeof last.hash === "string" ? last.hash : "";
+  ps.track.lastProbe = last && typeof last.probe === "string" ? last.probe : "";
+  ps.track.lastKind = last && typeof last.kind === "string" ? last.kind : "";
+  ps.track.lastTurn = last ? sanitizeInt(last.turn, -1, -1, 999999) : -1;
+  clearRetryCycle(ps);
 }
 
 function trimEntries(ps, keepTurn) {
@@ -438,30 +500,142 @@ function trimEntries(ps, keepTurn) {
 }
 
 function savePending(ps, raw, cooked) {
+  const type = getPlayerType(getType(), raw);
   ps.pending = {
     raw: String(raw || ""),
     cooked: String(cooked || ""),
-    type: getType(),
+    type: type,
     turn: getTurn()
+  };
+  rememberPending(ps, raw, type);
+}
+
+function clearPending(ps) {
+  ps.pending = mkPending();
+  ps.track.pendingRaw = "";
+  ps.track.pendingNorm = "";
+  ps.track.pendingType = "";
+  ps.track.pendingSig = "";
+  ps.track.pendingTurn = -1;
+}
+
+function rememberPending(ps, raw, type) {
+  const norm = normalizeActionText(raw);
+  if (!norm || !isPlayerType(type)) {
+    clearPending(ps);
+    return;
+  }
+
+  clearRetryCycle(ps);
+  ps.track.pendingRaw = String(raw || "");
+  ps.track.pendingNorm = norm;
+  ps.track.pendingType = type;
+  ps.track.pendingSig = getActionSig(type, raw);
+  ps.track.pendingTurn = getTurn();
+}
+
+function rememberRetryCycle(ps, cycle) {
+  ps.track.retryType = cycle.actionType || "";
+  ps.track.retryText = normalizeActionText(cycle.actionText);
+  ps.track.retrySig = cycle.sig || "";
+  ps.track.retryKind = cycle.kind || "";
+  ps.track.retryTurn = cycle.turn;
+}
+
+function clearRetryCycle(ps) {
+  ps.track.retryType = "";
+  ps.track.retryText = "";
+  ps.track.retrySig = "";
+  ps.track.retryKind = "";
+  ps.track.retryTurn = -1;
+}
+
+function rememberProcessedTurn(ps, cycle, output) {
+  ps.track.lastType = cycle.actionType || "";
+  ps.track.lastText = normalizeActionText(cycle.actionText);
+  ps.track.lastSig = cycle.sig || "";
+  ps.track.lastHash = cycle.hash || "";
+  ps.track.lastProbe = getResponseProbe(output);
+  ps.track.lastKind = cycle.kind || "";
+  ps.track.lastTurn = cycle.turn;
+  clearRetryCycle(ps);
+}
+
+function classifyTurn(ps) {
+  const turn = getTurn();
+  const type = getType();
+  const hash = getHistoryHash();
+  const pendingFresh = ps.track.pendingTurn === turn && !!ps.track.pendingSig;
+  const latest = getLatestPlayerAction(history);
+  const retryFresh = ps.track.retryTurn === turn && !!ps.track.retrySig && !pendingFresh;
+  let kind = "continue";
+  let actionType = "continue";
+  let actionText = "";
+  let sig = "continue:" + hash;
+
+  if (pendingFresh) {
+    kind = "action";
+    actionType = ps.track.pendingType || getPlayerType(type, ps.track.pendingRaw);
+    actionText = ps.track.pendingRaw || "";
+    sig = "action:" + (ps.track.pendingSig || getActionSig(actionType, actionText));
+  } else if (retryFresh) {
+    kind = ps.track.retryKind || (type === "retry" ? "retry" : "continue");
+    actionType = ps.track.retryType || "continue";
+    actionText = ps.track.retryText || "";
+    sig = ps.track.retrySig;
+  } else if (type === "retry" && ps.track.lastSig) {
+    kind = ps.track.lastKind || "retry";
+    actionType = ps.track.lastType || "continue";
+    actionText = ps.track.lastText || "";
+    sig = ps.track.lastSig;
+  } else if (type === "continue" || !latest) {
+    kind = "continue";
+    sig = "continue:" + hash;
+  } else {
+    kind = "history";
+    actionType = isPlayerType(latest.type) ? latest.type : "story";
+    actionText = latest.text || latest.rawText || "";
+    sig = "action:" + getActionSig(actionType, actionText);
+  }
+
+  const sameSig = !!sig && sig === ps.track.lastSig;
+  const sameHash = !!hash && hash === ps.track.lastHash;
+  const sameTurn = turn === ps.track.lastTurn;
+  const explicitRetry = type === "retry";
+  const probePresent = isResponseStillPresent(ps.track.lastProbe);
+  const implicitRetry = hasTurn(ps, turn) && !pendingFresh && sameTurn && sameSig && (sameHash || !probePresent);
+
+  return {
+    turn: turn,
+    type: type,
+    hash: hash,
+    kind: kind,
+    actionType: actionType,
+    actionText: actionText,
+    sig: sig,
+    pendingFresh: pendingFresh,
+    explicitRetry: explicitRetry,
+    implicitRetry: implicitRetry
   };
 }
 
-function recordTurn(ps, text) {
+function recordTurn(ps, text, cycleHint) {
   if (!isReady(ps.cfg)) {
-    ps.pending = mkPending();
+    clearPending(ps);
     return text;
   }
 
   const turn = getTurn();
-  const retry = hasTurn(ps, turn);
+  const cycle = cycleHint || classifyTurn(ps);
   const focus = ps.rt.focus;
   const role = ps.roles[focus];
   const pending = ps.pending.turn === turn ? ps.pending : mkPending();
+  const actionText = pending.cooked || pending.raw || cycle.actionText || "";
   const output = cleanOut(text);
 
   upsertTurn(role.turns, {
     turn: turn,
-    input: compact(pending.cooked || pending.raw, 160),
+    input: compact(actionText, 160),
     output: compact(output, 220)
   }, ps.cfg.recentMax);
 
@@ -473,7 +647,7 @@ function recordTurn(ps, text) {
     resetClock(ps);
   }
 
-  if (!retry && !(ps.rt.together && ps.cfg.suspendTogether)) {
+  if (!(ps.rt.together && ps.cfg.suspendTogether)) {
     ps.rt.turns += 1;
     if (ps.rt.turns >= ps.rt.target) {
       role.handoff = role.live;
@@ -488,8 +662,16 @@ function recordTurn(ps, text) {
   ps.roles.secondary.live = buildLive(ps, "secondary");
   ps.rt.lastLogged = turn;
   ps.rt.lastSeen = turn;
-  saveSnapshot(ps, turn);
-  ps.pending = mkPending();
+  saveSnapshot(ps, turn, {
+    sig: cycle.sig,
+    hash: cycle.hash,
+    kind: cycle.kind,
+    aType: cycle.actionType,
+    aText: normalizeActionText(cycle.actionText),
+    probe: getResponseProbe(output)
+  });
+  rememberProcessedTurn(ps, cycle, output);
+  clearPending(ps);
   debug(ps, "turn recorded");
   return text;
 }
@@ -524,7 +706,8 @@ function upsertTurn(list, item, max) {
   }
 }
 
-function saveSnapshot(ps, turn) {
+function saveSnapshot(ps, turn, meta) {
+  const data = meta || {};
   const item = {
     turn: turn,
     focus: ps.rt.focus,
@@ -532,7 +715,13 @@ function saveSnapshot(ps, turn) {
     turns: ps.rt.turns,
     target: ps.rt.target,
     pH: ps.roles.primary.handoff || "",
-    sH: ps.roles.secondary.handoff || ""
+    sH: ps.roles.secondary.handoff || "",
+    sig: typeof data.sig === "string" ? data.sig : ps.track.lastSig,
+    hash: typeof data.hash === "string" ? data.hash : ps.track.lastHash,
+    kind: typeof data.kind === "string" ? data.kind : ps.track.lastKind,
+    aType: typeof data.aType === "string" ? data.aType : ps.track.lastType,
+    aText: typeof data.aText === "string" ? data.aText : ps.track.lastText,
+    probe: typeof data.probe === "string" ? data.probe : ps.track.lastProbe
   };
 
   let replaced = false;
@@ -949,6 +1138,80 @@ function flipFocus(focus) {
 
 function getFocusName(ps, key) {
   return key === "secondary" ? ps.cfg.secondaryName : ps.cfg.primaryName;
+}
+
+function getLatestPlayerAction(items) {
+  const list = Array.isArray(items) ? items : [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const item = list[i];
+    if (item && isPlayerType(item.type)) {
+      return item;
+    }
+  }
+  return null;
+}
+
+function isPlayerType(type) {
+  return type === "do" || type === "say" || type === "story";
+}
+
+function getPlayerType(type, text) {
+  if (isPlayerType(type)) {
+    return type;
+  }
+
+  const raw = String(text || "").trim();
+  if (!raw) {
+    return "do";
+  }
+  if (/^["']/.test(raw)) {
+    return "say";
+  }
+  return "do";
+}
+
+function normalizeActionText(text) {
+  return String(text || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getActionSig(type, text) {
+  return (type || "") + ":" + normalizeActionText(text);
+}
+
+function getHistoryHash() {
+  const list = Array.isArray(history) ? history.slice(-50) : [];
+  const serialized = JSON.stringify(list);
+  let hash = 0;
+
+  for (let i = 0; i < serialized.length; i += 1) {
+    hash = ((31 * hash) + serialized.charCodeAt(i)) | 0;
+  }
+
+  return hash.toString(16);
+}
+
+function getResponseProbe(text) {
+  const clean = compact(text, 120);
+  if (!clean) {
+    return "";
+  }
+  return clean.length > 64 ? clean.slice(0, 64) : clean;
+}
+
+function isResponseStillPresent(probe) {
+  if (!probe) {
+    return false;
+  }
+
+  const recent = (Array.isArray(history) ? history : [])
+    .slice(-6)
+    .map((item) => item && item.text ? item.text : "")
+    .join("\n");
+
+  return recent.indexOf(probe) !== -1;
 }
 
 function compact(text, max) {
