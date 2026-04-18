@@ -7,57 +7,22 @@ const PS_CARD_DESC = "Parallel Saros settings. Edit the fields below to configur
 const PS_BLOCK_START = "<PS>";
 const PS_BLOCK_END = "</PS>";
 
-const PS_TOGETHER_TERMS = [
+const PS_TASK_NONE = "";
+const PS_TASK_PRESENCE = "presence";
+const PS_TASK_SUMMARY = "summary";
+const PS_TASK_CD = 2;
+const PS_PRESENCE_HINTS = [
   "meet",
-  "meets",
-  "met",
-  "meet up",
-  "meets up",
+  "find",
+  "search",
+  "look for",
   "rejoin",
-  "rejoins",
-  "rejoined",
-  "regroup",
-  "regroups",
-  "regrouped",
-  "back together",
-  "face to face",
-  "stand together",
-  "standing together",
-  "arrive together",
-  "arrives together",
-  "same room",
-  "same place",
-  "same location",
-  "same space",
-  "in the room with",
-  "in the same room",
-  "in the same place",
-  "in the same location"
-];
-
-const PS_SEPARATE_TERMS = [
-  "separate",
-  "separates",
-  "separated",
-  "split up",
-  "splits up",
-  "part ways",
-  "parts ways",
-  "go separate ways",
-  "goes separate ways",
-  "went separate ways",
-  "different places",
-  "different locations",
-  "separate locations",
-  "separate rooms",
-  "no longer together",
-  "are apart",
-  "move apart",
-  "moves apart",
-  "moved apart",
-  "heads elsewhere",
-  "head elsewhere",
-  "went alone"
+  "join",
+  "leave",
+  "split",
+  "together",
+  "apart",
+  "same room"
 ];
 
 const PS_HELP = [
@@ -180,6 +145,12 @@ function getPs() {
       rt: {
         focus: "primary",
         together: false,
+        manual: "",
+        task: PS_TASK_NONE,
+        taskRole: "",
+        taskTurn: -1,
+        taskTry: 0,
+        taskCd: 0,
         turns: 0,
         target: 12,
         lastLogged: -1,
@@ -399,6 +370,12 @@ function normalizeRt(ps) {
 
   rt.focus = sanitizeFocus(rt.focus || cfg.startFocus);
   rt.together = parseBool(rt.together, false);
+  rt.manual = sanitizeManual(rt.manual);
+  rt.task = sanitizeTask(rt.task);
+  rt.taskRole = sanitizeTaskRole(rt.taskRole);
+  rt.taskTurn = sanitizeInt(rt.taskTurn, -1, -1, 999999);
+  rt.taskTry = sanitizeInt(rt.taskTry, 0, 0, 99);
+  rt.taskCd = sanitizeInt(rt.taskCd, 0, 0, 99);
   rt.turns = sanitizeInt(rt.turns, 0, 0, 9999);
   rt.target = clampTarget(cfg, sanitizeInt(rt.target, cfg.center, PS_MIN_TURNS, 9999));
   rt.lastLogged = sanitizeInt(rt.lastLogged, -1, -1, 999999);
@@ -478,6 +455,12 @@ function restoreRt(ps) {
 
   ps.rt.focus = last ? sanitizeFocus(last.focus) : sanitizeFocus(ps.cfg.startFocus);
   ps.rt.together = last ? parseBool(last.together, false) : false;
+  ps.rt.manual = last ? sanitizeManual(last.manual) : "";
+  ps.rt.task = last ? sanitizeTask(last.task) : PS_TASK_NONE;
+  ps.rt.taskRole = last ? sanitizeTaskRole(last.taskRole) : "";
+  ps.rt.taskTurn = last ? sanitizeInt(last.taskTurn, -1, -1, 999999) : -1;
+  ps.rt.taskTry = last ? sanitizeInt(last.taskTry, 0, 0, 99) : 0;
+  ps.rt.taskCd = last ? sanitizeInt(last.taskCd, 0, 0, 99) : 0;
   ps.rt.turns = last ? sanitizeInt(last.turns, 0, 0, 9999) : 0;
   ps.rt.target = last ? clampTarget(ps.cfg, sanitizeInt(last.target, ps.cfg.center, PS_MIN_TURNS, 9999)) : nextTarget(ps);
   ps.rt.lastLogged = -1;
@@ -629,9 +612,13 @@ function recordTurn(ps, text, cycleHint) {
   const cycle = cycleHint || classifyTurn(ps);
   const focus = ps.rt.focus;
   const role = ps.roles[focus];
+  const task = getActiveTask(ps);
   const pending = ps.pending.turn === turn ? ps.pending : mkPending();
   const actionText = pending.cooked || pending.raw || cycle.actionText || "";
-  const output = cleanOut(text);
+  const parsed = parseTaskOutput(ps, text);
+  const storyText = parsed.story;
+  const sceneOut = stripBlock(storyText).replace(/\s*<<[\s\S]*?>>\s*/g, " ");
+  const output = compact(sceneOut, 260);
 
   upsertTurn(role.turns, {
     turn: turn,
@@ -641,25 +628,28 @@ function recordTurn(ps, text, cycleHint) {
 
   role.live = buildLive(ps, focus);
 
-  const together = scanTogether(ps, pending.cooked + "\n" + output);
-  if (together !== null && together !== ps.rt.together) {
-    ps.rt.together = together;
-    resetClock(ps);
+  if (task === PS_TASK_PRESENCE) {
+    applyPresenceTask(ps, parsed.presence);
   }
 
-  if (!(ps.rt.together && ps.cfg.suspendTogether)) {
+  if (ps.rt.together && ps.cfg.suspendTogether) {
+    ps.rt.turns = 0;
+  } else {
     ps.rt.turns += 1;
     if (ps.rt.turns >= ps.rt.target) {
-      role.handoff = role.live;
-      ps.rt.focus = flipFocus(focus);
-      resetClock(ps);
+      if (task === PS_TASK_PRESENCE) {
+        ps.rt.turns = Math.max(ps.rt.turns, ps.rt.target);
+      } else {
+        role.handoff = task === PS_TASK_SUMMARY ? (parsed.summary || role.live) : role.live;
+        ps.rt.focus = flipFocus(focus);
+        resetClock(ps);
+      }
     }
-  } else if (ps.rt.together && ps.cfg.suspendTogether) {
-    ps.rt.turns = 0;
   }
 
   ps.roles.primary.live = buildLive(ps, "primary");
   ps.roles.secondary.live = buildLive(ps, "secondary");
+  finishTask(ps, task);
   ps.rt.lastLogged = turn;
   ps.rt.lastSeen = turn;
   saveSnapshot(ps, turn, {
@@ -673,7 +663,7 @@ function recordTurn(ps, text, cycleHint) {
   rememberProcessedTurn(ps, cycle, output);
   clearPending(ps);
   debug(ps, "turn recorded");
-  return text;
+  return storyText;
 }
 
 function hasTurn(ps, turn) {
@@ -714,6 +704,12 @@ function saveSnapshot(ps, turn, meta) {
     together: ps.rt.together,
     turns: ps.rt.turns,
     target: ps.rt.target,
+    manual: ps.rt.manual,
+    task: ps.rt.task,
+    taskRole: ps.rt.taskRole,
+    taskTurn: ps.rt.taskTurn,
+    taskTry: ps.rt.taskTry,
+    taskCd: ps.rt.taskCd,
     pH: ps.roles.primary.handoff || "",
     sH: ps.roles.secondary.handoff || "",
     sig: typeof data.sig === "string" ? data.sig : ps.track.lastSig,
@@ -807,18 +803,18 @@ function getWave(ps) {
   return ((getTurn() + bias) % span) - ps.cfg.flex;
 }
 
-function buildCtx() {
+function buildCtx(text) {
   const ps = getPs();
   if (!isReady(ps.cfg)) {
     return "";
   }
 
+  const task = planTask(ps, text);
   const bounds = getBounds(ps.cfg);
   const focusName = getFocusName(ps, ps.rt.focus);
   const pSummary = ps.roles.primary.handoff || ps.roles.primary.live || "No primary checkpoint yet.";
   const sSummary = ps.roles.secondary.handoff || ps.roles.secondary.live || "No secondary checkpoint yet.";
-
-  const lines = [
+  const lines = buildTaskLines(ps, task).concat([
     "Focus: " + ps.rt.focus + " (" + focusName + ").",
     ps.rt.focus === "primary"
       ? 'Narrate the active thread in second person as "you". Keep ' + ps.cfg.secondaryName + " in third person."
@@ -828,7 +824,7 @@ function buildCtx() {
       : "Use a soft switch rhythm around " + bounds.min + "-" + bounds.max + " turns. Current counter: " + ps.rt.turns + "/" + ps.rt.target + ".",
     "Primary checkpoint: " + pSummary,
     "Secondary checkpoint: " + sSummary
-  ];
+  ]);
 
   const room = Math.max(120, ps.cfg.noteMax - PS_BLOCK_START.length - PS_BLOCK_END.length - 4);
   const body = clip(lines.join("\n"), room);
@@ -840,7 +836,7 @@ function injectNote(text) {
   const max = getMaxChars();
   const memoryText = memory ? String(text || "").slice(0, memory) : "";
   let context = memory ? String(text || "").slice(memory) : String(text || "");
-  const block = buildCtx();
+  const block = buildCtx(context);
 
   context = stripBlock(context);
   if (!block) {
@@ -867,25 +863,185 @@ function cleanOut(text) {
   return compact(stripBlock(text).replace(/\s*<<[\s\S]*?>>\s*/g, " "), 260);
 }
 
-function scanTogether(ps, text) {
+function setTogether(ps, value, rule) {
+  if (ps.rt.together === value) {
+    return;
+  }
+
+  ps.rt.together = value;
+  resetClock(ps);
+  debug(ps, "presence " + (value ? "together" : "separate") + (rule ? " via " + rule : ""));
+}
+
+function getActiveTask(ps) {
+  return ps.rt.taskTurn === getTurn() ? ps.rt.task : PS_TASK_NONE;
+}
+
+function planTask(ps, text) {
+  const turn = getTurn();
+  if (ps.rt.taskTurn === turn && ps.rt.task !== PS_TASK_NONE) {
+    return ps.rt.task;
+  }
+
+  clearTask(ps);
   if (!isReady(ps.cfg)) {
-    return null;
+    return PS_TASK_NONE;
   }
 
-  const sample = " " + compact(text, 600).toLowerCase() + " ";
-  const hasA = hasName(sample, ps.cfg.primaryName);
-  const hasB = hasName(sample, ps.cfg.secondaryName);
+  if (shouldAskPresence(ps, text)) {
+    setTask(ps, PS_TASK_PRESENCE, "");
+    return ps.rt.task;
+  }
 
-  if ((hasA && hasB) || sample.includes(" both ")) {
-    if (hasPhrase(sample, PS_TOGETHER_TERMS)) {
-      return true;
-    }
-    if (hasPhrase(sample, PS_SEPARATE_TERMS)) {
-      return false;
+  if (shouldAskSummary(ps)) {
+    setTask(ps, PS_TASK_SUMMARY, ps.rt.focus);
+    return ps.rt.task;
+  }
+
+  return PS_TASK_NONE;
+}
+
+function shouldAskPresence(ps, text) {
+  if (ps.rt.manual || ps.rt.taskCd > 0) {
+    return false;
+  }
+
+  const seed = buildPresenceSeed(ps, text);
+  if (!seed) {
+    return false;
+  }
+
+  const lower = seed.toLowerCase();
+  const hasHint = hasPhrase(lower, PS_PRESENCE_HINTS);
+  if (!hasHint) {
+    return false;
+  }
+
+  const hasSecondary = hasName(lower, ps.cfg.secondaryName);
+  const hasPrimary = hasName(lower, ps.cfg.primaryName) || /\byou\b/.test(lower);
+  const pairCue = /\bboth\b|\beach other\b|\btogether\b|\bapart\b|\bsame room\b|\bface to face\b/.test(lower);
+  return pairCue || (hasSecondary && hasPrimary) || (ps.rt.focus === "primary" && hasSecondary) || (ps.rt.focus === "secondary" && hasPrimary);
+}
+
+function buildPresenceSeed(ps, text) {
+  const recent = getRecentText(4);
+  return [
+    ps.pending.raw,
+    ps.pending.cooked !== ps.pending.raw ? ps.pending.cooked : "",
+    recent,
+    compact(text, 900)
+  ].filter(Boolean).join("\n");
+}
+
+function getRecentText(max) {
+  const list = Array.isArray(history) ? history.slice(-Math.max(0, max || 0)) : [];
+  const bits = [];
+
+  for (let i = 0; i < list.length; i += 1) {
+    const text = list[i] && (list[i].rawText || list[i].text);
+    if (text) {
+      bits.push(String(text));
     }
   }
 
-  return null;
+  return bits.join("\n");
+}
+
+function shouldAskSummary(ps) {
+  return !(ps.rt.together && ps.cfg.suspendTogether) && ps.rt.turns + 1 >= ps.rt.target;
+}
+
+function buildTaskLines(ps, task) {
+  if (task === PS_TASK_PRESENCE) {
+    return [
+      "Control task: start the reply with exactly one line `(ps_presence=together)` or `(ps_presence=separate)` or `(ps_presence=unclear)`, then continue the story.",
+      "Choose together only if both protagonists are clearly sharing the same scene now. Choose separate only if they are clearly apart. Choose unclear if the scene does not make this explicit."
+    ];
+  }
+
+  if (task === PS_TASK_SUMMARY) {
+    return [
+      "Control task: start the reply with exactly one line `(ps_summary=`one short factual checkpoint sentence`)`, then continue the story.",
+      "Keep that checkpoint to one short sentence about the active thread only, under 160 characters, with no dialogue."
+    ];
+  }
+
+  return [];
+}
+
+function parseTaskOutput(ps, text) {
+  const raw = String(text || "");
+  const task = getActiveTask(ps);
+  if (task === PS_TASK_PRESENCE) {
+    return parsePresenceOutput(raw);
+  }
+  if (task === PS_TASK_SUMMARY) {
+    return parseSummaryOutput(ps, raw);
+  }
+  return {
+    story: raw,
+    presence: "",
+    summary: ""
+  };
+}
+
+function parsePresenceOutput(text) {
+  const match = String(text || "").match(/^\s*\(ps_presence\s*=\s*(together|separate|unclear)\s*\)\s*/i);
+  if (!match) {
+    return { story: String(text || ""), presence: "", summary: "" };
+  }
+
+  return {
+    story: String(text || "").slice(match[0].length),
+    presence: match[1].toLowerCase(),
+    summary: ""
+  };
+}
+
+function parseSummaryOutput(ps, text) {
+  const match = String(text || "").match(/^\s*\(ps_summary\s*=\s*`([^`]{1,320})`\s*\)\s*/i);
+  if (!match) {
+    return { story: String(text || ""), presence: "", summary: "" };
+  }
+
+  return {
+    story: String(text || "").slice(match[0].length),
+    presence: "",
+    summary: clip(compact(match[1], 180), ps.cfg.summaryMax)
+  };
+}
+
+function applyPresenceTask(ps, decision) {
+  const value = String(decision || "").toLowerCase();
+  if (value === "together") {
+    setTogether(ps, true, "ai");
+  } else if (value === "separate") {
+    setTogether(ps, false, "ai");
+  }
+}
+
+function setTask(ps, kind, role) {
+  ps.rt.task = sanitizeTask(kind);
+  ps.rt.taskRole = sanitizeTaskRole(role);
+  ps.rt.taskTurn = getTurn();
+  ps.rt.taskTry = 1;
+}
+
+function clearTask(ps) {
+  ps.rt.task = PS_TASK_NONE;
+  ps.rt.taskRole = "";
+  ps.rt.taskTurn = -1;
+  ps.rt.taskTry = 0;
+}
+
+function finishTask(ps, task) {
+  if (task === PS_TASK_PRESENCE) {
+    ps.rt.taskCd = PS_TASK_CD;
+  } else if (ps.rt.taskCd > 0) {
+    ps.rt.taskCd -= 1;
+  }
+
+  clearTask(ps);
 }
 
 function hasName(text, name) {
@@ -899,8 +1055,10 @@ function hasName(text, name) {
 }
 
 function hasPhrase(text, list) {
+  const sample = String(text || "").toLowerCase();
   for (let i = 0; i < list.length; i += 1) {
-    if (text.indexOf(" " + list[i].toLowerCase() + " ") !== -1) {
+    const rx = new RegExp("(^|[^a-z0-9])" + toPhraseRx(list[i]) + "([^a-z0-9]|$)", "i");
+    if (rx.test(sample)) {
       return true;
     }
   }
@@ -1068,6 +1226,7 @@ function handleCmd(text) {
     if (isReady(ps.cfg)) {
       ps.roles[ps.rt.focus].handoff = ps.roles[ps.rt.focus].live;
       ps.rt.focus = flipFocus(ps.rt.focus);
+      clearTask(ps);
       resetClock(ps);
       saveSnapshot(ps, getTurn());
       reply = "Focus switched to " + ps.rt.focus + ".";
@@ -1076,21 +1235,27 @@ function handleCmd(text) {
     }
   } else if (lower === "/psaros focus primary") {
     ps.rt.focus = "primary";
+    clearTask(ps);
     resetClock(ps);
     saveSnapshot(ps, getTurn());
     reply = "Focus set to primary.";
   } else if (lower === "/psaros focus secondary") {
     ps.rt.focus = "secondary";
+    clearTask(ps);
     resetClock(ps);
     saveSnapshot(ps, getTurn());
     reply = "Focus set to secondary.";
   } else if (lower === "/psaros together") {
     ps.rt.together = true;
+    ps.rt.manual = "together";
+    clearTask(ps);
     resetClock(ps);
     saveSnapshot(ps, getTurn());
     reply = "Protagonists marked as together.";
   } else if (lower === "/psaros split") {
     ps.rt.together = false;
+    ps.rt.manual = "separate";
+    clearTask(ps);
     resetClock(ps);
     saveSnapshot(ps, getTurn());
     reply = "Protagonists marked as separate.";
@@ -1117,6 +1282,8 @@ function buildStatus(ps) {
     "Secondary: " + (ps.cfg.secondaryName || "(blank)"),
     "Focus: " + ps.rt.focus,
     "Together: " + String(ps.rt.together),
+    "Presence lock: " + (ps.rt.manual || "auto"),
+    "Task: " + (getActiveTask(ps) || "none") + (ps.rt.taskCd ? " (cooldown " + ps.rt.taskCd + ")" : ""),
     "Switch center/flex: " + ps.cfg.center + " +/- " + ps.cfg.flex,
     "Switch window: " + bounds.min + "-" + bounds.max,
     "Current target: " + ps.rt.target,
@@ -1259,6 +1426,10 @@ function esc(text) {
   return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function toPhraseRx(text) {
+  return esc(String(text || "").toLowerCase()).replace(/\s+/g, "\\s+");
+}
+
 function sanitizeInt(value, fallback, min, max) {
   const num = parseInt(value, 10);
   if (!Number.isFinite(num)) {
@@ -1282,6 +1453,30 @@ function clampTarget(cfg, value) {
 
 function sanitizeFocus(value) {
   return String(value || "").toLowerCase() === "secondary" ? "secondary" : "primary";
+}
+
+function sanitizeManual(value) {
+  const lower = String(value || "").toLowerCase();
+  if (lower === "together" || lower === "separate") {
+    return lower;
+  }
+  return "";
+}
+
+function sanitizeTask(value) {
+  const lower = String(value || "").toLowerCase();
+  if (lower === PS_TASK_PRESENCE || lower === PS_TASK_SUMMARY) {
+    return lower;
+  }
+  return PS_TASK_NONE;
+}
+
+function sanitizeTaskRole(value) {
+  const lower = String(value || "").toLowerCase();
+  if (lower === "primary" || lower === "secondary") {
+    return lower;
+  }
+  return "";
 }
 
 function clamp(value, min, max) {
@@ -1313,7 +1508,12 @@ function debug(ps, msg) {
     turn: getTurn(),
     focus: ps.rt.focus,
     together: ps.rt.together,
+    manual: ps.rt.manual,
     turns: ps.rt.turns,
     target: ps.rt.target
   });
+}
+
+function squeeze(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
 }
