@@ -244,7 +244,7 @@ function syncCfg() {
     return ps;
   }
 
-  const cfg = loadCfg(card.entry || "");
+  const cfg = loadCfg(card.entry || "", ps.cfg);
   const built = buildCfg(cfg);
 
   if (card.entry !== built) {
@@ -315,20 +315,14 @@ function initCard(card) {
   }
 }
 
+// PS Settings used to expose a longer list of user-facing tuning fields here.
+// The card is intentionally minimal now: only the protagonist identities and the
+// switch center remain editable; the rest stays as internal defaults in code.
 function buildCfg(cfg) {
   return [
     "Primary Name: " + (cfg.primaryName || ""),
     "Secondary Name: " + (cfg.secondaryName || ""),
-    "Switch Center: " + sanitizeEvery(cfg.center),
-    "Switch Flex: " + sanitizeFlex(cfg.flex),
-    "Start Focus: " + sanitizeFocus(cfg.startFocus),
-    "Suspend When Together: " + String(parseBool(cfg.suspendTogether, true)),
-    "Rewrite Secondary Input: " + String(parseBool(cfg.rewriteSecondary, true)),
-    "Debug: " + String(parseBool(cfg.debug, false)),
-    "Summary Max Chars: " + sanitizeInt(cfg.summaryMax, 260, 120, 500),
-    "Author Note Max Chars: " + sanitizeInt(cfg.noteMax, 700, 300, 1500),
-    "Recent Turns Per Role: " + sanitizeInt(cfg.recentMax, 6, 2, 12),
-    "Max Journal Entries: " + sanitizeInt(cfg.journalMax, 80, 20, 160)
+    "Switch Center: " + sanitizeEvery(cfg.center)
   ].join("\n");
 }
 
@@ -338,21 +332,20 @@ function getCfgLine(entry, label) {
   return match ? match[1].trim() : "";
 }
 
-function loadCfg(entry) {
+// The old card-level custom fields were retired with the simplified settings
+// card. Runtime-only flags such as debug can still survive in memory, but they
+// are no longer read from or written to the story card.
+function loadCfg(entry, prevCfg) {
   const cfg = defaultCfg();
+  const prev = prevCfg && typeof prevCfg === "object" ? prevCfg : null;
+
+  if (prev) {
+    cfg.debug = parseBool(prev.debug, cfg.debug);
+  }
 
   cfg.primaryName = cleanName(getCfgLine(entry, "Primary Name"));
   cfg.secondaryName = cleanName(getCfgLine(entry, "Secondary Name"));
   cfg.center = sanitizeEvery(getCfgLine(entry, "Switch Center"));
-  cfg.flex = sanitizeFlex(getCfgLine(entry, "Switch Flex"));
-  cfg.startFocus = sanitizeFocus(getCfgLine(entry, "Start Focus"));
-  cfg.suspendTogether = parseBool(getCfgLine(entry, "Suspend When Together"), cfg.suspendTogether);
-  cfg.rewriteSecondary = parseBool(getCfgLine(entry, "Rewrite Secondary Input"), cfg.rewriteSecondary);
-  cfg.debug = parseBool(getCfgLine(entry, "Debug"), cfg.debug);
-  cfg.summaryMax = sanitizeInt(getCfgLine(entry, "Summary Max Chars"), cfg.summaryMax, 120, 500);
-  cfg.noteMax = sanitizeInt(getCfgLine(entry, "Author Note Max Chars"), cfg.noteMax, 300, 1500);
-  cfg.recentMax = sanitizeInt(getCfgLine(entry, "Recent Turns Per Role"), cfg.recentMax, 2, 12);
-  cfg.journalMax = sanitizeInt(getCfgLine(entry, "Max Journal Entries"), cfg.journalMax, 20, 160);
 
   return cfg;
 }
