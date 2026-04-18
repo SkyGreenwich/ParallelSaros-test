@@ -183,6 +183,7 @@ function getPs() {
         focus: "primary",
         together: false,
         manual: "",
+        breakTurn: -1,
         task: PS_TASK_NONE,
         taskRole: "",
         taskTurn: -1,
@@ -409,6 +410,7 @@ function normalizeRt(ps) {
   rt.focus = sanitizeFocus(rt.focus || cfg.startFocus);
   rt.together = parseBool(rt.together, false);
   rt.manual = sanitizeManual(rt.manual);
+  rt.breakTurn = sanitizeInt(rt.breakTurn, -1, -1, 999999);
   rt.task = sanitizeTask(rt.task);
   rt.taskRole = sanitizeTaskRole(rt.taskRole);
   rt.taskTurn = sanitizeInt(rt.taskTurn, -1, -1, 999999);
@@ -495,6 +497,7 @@ function restoreRt(ps) {
   ps.rt.focus = last ? sanitizeFocus(last.focus) : sanitizeFocus(ps.cfg.startFocus);
   ps.rt.together = last ? parseBool(last.together, false) : false;
   ps.rt.manual = last ? sanitizeManual(last.manual) : "";
+  ps.rt.breakTurn = last ? sanitizeInt(last.breakTurn, -1, -1, 999999) : -1;
   ps.rt.task = last ? sanitizeTask(last.task) : PS_TASK_NONE;
   ps.rt.taskRole = last ? sanitizeTaskRole(last.taskRole) : "";
   ps.rt.taskTurn = last ? sanitizeInt(last.taskTurn, -1, -1, 999999) : -1;
@@ -714,25 +717,8 @@ function recordTurn(ps, text, cycleHint) {
       } else {
         role.handoff = task === PS_TASK_SUMMARY ? (parsed.summary || role.live) : role.live;
         ps.rt.focus = flipFocus(focus);
-        const marked = addShiftMark(storyText);
+        ps.rt.breakTurn = turn + 1;
         resetClock(ps);
-        ps.roles.primary.live = buildLive(ps, "primary");
-        ps.roles.secondary.live = buildLive(ps, "secondary");
-        finishTask(ps, task);
-        ps.rt.lastLogged = turn;
-        ps.rt.lastSeen = turn;
-        saveSnapshot(ps, turn, {
-          sig: cycle.sig,
-          hash: cycle.hash,
-          kind: cycle.kind,
-          aType: cycle.actionType,
-          aText: normalizeActionText(cycle.actionText),
-          probe: getResponseProbe(output)
-        });
-        rememberProcessedTurn(ps, cycle, output);
-        clearPending(ps);
-        debug(ps, "turn recorded");
-        return marked;
       }
     }
   }
@@ -753,7 +739,16 @@ function recordTurn(ps, text, cycleHint) {
   rememberProcessedTurn(ps, cycle, output);
   clearPending(ps);
   debug(ps, "turn recorded");
-  return storyText;
+  return applyBreakMark(ps, storyText, turn);
+}
+
+function applyBreakMark(ps, text, turn) {
+  if (ps.rt.breakTurn !== turn) {
+    return text;
+  }
+
+  ps.rt.breakTurn = -1;
+  return addShiftMark(text);
 }
 
 function addShiftMark(text) {
@@ -806,6 +801,7 @@ function saveSnapshot(ps, turn, meta) {
     turns: ps.rt.turns,
     target: ps.rt.target,
     manual: ps.rt.manual,
+    breakTurn: ps.rt.breakTurn,
     task: ps.rt.task,
     taskRole: ps.rt.taskRole,
     taskTurn: ps.rt.taskTurn,
