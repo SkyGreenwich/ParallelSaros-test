@@ -10,7 +10,7 @@ const PS_SHIFT_MARK = "----------------";
 
 const PS_TASK_NONE = "";
 const PS_TASK_PRESENCE = "presence";
-const PS_TASK_SUMMARY = "summary";
+const PS_TASK_THREAD = "thread";
 const PS_TASK_CD = 2;
 const PS_PRESENCE_HINTS = [
   "meet",
@@ -241,7 +241,10 @@ function mkRole() {
   return {
     turns: [],
     live: "",
-    handoff: ""
+    handoff: "",
+    scene: "",
+    knows: "",
+    next: ""
   };
 }
 
@@ -474,11 +477,17 @@ function reconcile(cycleHint) {
   if (!ps.roles.primary.turns.length) {
     ps.roles.primary.live = "";
     ps.roles.primary.handoff = ps.journal.length ? ps.roles.primary.handoff : "";
+    if (!ps.journal.length) {
+      clearThreadState(ps.roles.primary);
+    }
   }
 
   if (!ps.roles.secondary.turns.length) {
     ps.roles.secondary.live = "";
     ps.roles.secondary.handoff = ps.journal.length ? ps.roles.secondary.handoff : "";
+    if (!ps.journal.length) {
+      clearThreadState(ps.roles.secondary);
+    }
   }
 
   if (ps.pending.turn > rewindTurn) {
@@ -508,6 +517,12 @@ function restoreRt(ps) {
   ps.rt.lastLogged = -1;
   ps.roles.primary.handoff = last && typeof last.pH === "string" ? last.pH : "";
   ps.roles.secondary.handoff = last && typeof last.sH === "string" ? last.sH : "";
+  ps.roles.primary.scene = last && typeof last.pScene === "string" ? last.pScene : "";
+  ps.roles.primary.knows = last && typeof last.pKnow === "string" ? last.pKnow : "";
+  ps.roles.primary.next = last && typeof last.pNext === "string" ? last.pNext : "";
+  ps.roles.secondary.scene = last && typeof last.sScene === "string" ? last.sScene : "";
+  ps.roles.secondary.knows = last && typeof last.sKnow === "string" ? last.sKnow : "";
+  ps.roles.secondary.next = last && typeof last.sNext === "string" ? last.sNext : "";
   ps.track.lastType = last && typeof last.aType === "string" ? last.aType : "";
   ps.track.lastText = last && typeof last.aText === "string" ? last.aText : "";
   ps.track.lastSig = last && typeof last.sig === "string" ? last.sig : "";
@@ -705,6 +720,8 @@ function recordTurn(ps, text, cycleHint) {
 
   if (task === PS_TASK_PRESENCE) {
     applyPresenceTask(ps, parsed.presence);
+  } else if (task === PS_TASK_THREAD) {
+    applyThreadTask(role, parsed.thread);
   }
 
   if (ps.rt.together && ps.cfg.suspendTogether) {
@@ -715,7 +732,7 @@ function recordTurn(ps, text, cycleHint) {
       if (task === PS_TASK_PRESENCE) {
         ps.rt.turns = Math.max(ps.rt.turns, ps.rt.target);
       } else {
-        role.handoff = task === PS_TASK_SUMMARY ? (parsed.summary || role.live) : role.live;
+        role.handoff = buildThreadNote(ps, focus);
         ps.rt.focus = flipFocus(focus);
         ps.rt.breakTurn = turn + 1;
         resetClock(ps);
@@ -809,6 +826,12 @@ function saveSnapshot(ps, turn, meta) {
     taskCd: ps.rt.taskCd,
     pH: ps.roles.primary.handoff || "",
     sH: ps.roles.secondary.handoff || "",
+    pScene: ps.roles.primary.scene || "",
+    pKnow: ps.roles.primary.knows || "",
+    pNext: ps.roles.primary.next || "",
+    sScene: ps.roles.secondary.scene || "",
+    sKnow: ps.roles.secondary.knows || "",
+    sNext: ps.roles.secondary.next || "",
     sig: typeof data.sig === "string" ? data.sig : ps.track.lastSig,
     hash: typeof data.hash === "string" ? data.hash : ps.track.lastHash,
     kind: typeof data.kind === "string" ? data.kind : ps.track.lastKind,
@@ -839,6 +862,31 @@ function saveSnapshot(ps, turn, meta) {
 function buildLive(ps, key) {
   const role = ps.roles[key];
   return buildSummary(getFocusName(ps, key), role.turns, ps.cfg.summaryMax);
+}
+
+function buildThreadNote(ps, key) {
+  const role = ps.roles[key];
+  const name = getFocusName(ps, key);
+  if (!role || !name) {
+    return "";
+  }
+
+  const parts = [];
+  if (role.scene) {
+    parts.push("Scene: " + clip(role.scene, 110));
+  }
+  if (role.knows) {
+    parts.push("Knows: " + clip(role.knows, 130));
+  }
+  if (role.next) {
+    parts.push("Next: " + clip(role.next, 110));
+  }
+
+  if (!parts.length) {
+    return role.live || role.handoff || "";
+  }
+
+  return clip(name + " thread: " + parts.join(" | "), ps.cfg.summaryMax);
 }
 
 function buildSummary(name, turns, max) {
@@ -908,19 +956,39 @@ function buildCtx(text) {
 
   const task = planTask(ps, text);
   const bounds = getBounds(ps.cfg);
-  const focusName = getFocusName(ps, ps.rt.focus);
-  const pSummary = ps.roles.primary.handoff || ps.roles.primary.live || "No primary checkpoint yet.";
-  const sSummary = ps.roles.secondary.handoff || ps.roles.secondary.live || "No secondary checkpoint yet.";
+  const turn = getTurn();
+  const focusKey = ps.rt.focus;
+  const otherKey = flipFocus(focusKey);
+  const focusName = getFocusName(ps, focusKey);
+  const otherName = getFocusName(ps, otherKey);
+  const focusRole = ps.roles[focusKey];
+  const entering = ps.rt.breakTurn === turn;
+  const focusScene = buildThreadField(ps, focusKey, "scene");
+  const focusKnows = buildThreadField(ps, focusKey, "knows");
+  const focusNext = buildThreadField(ps, focusKey, "next");
+  const focusNote = buildThreadNote(ps, focusKey) || "No current-thread checkpoint yet.";
+  const offstage = buildOffstageNote(ps, otherKey);
   const lines = buildTaskLines(ps, task).concat([
-    "Focus: " + ps.rt.focus + " (" + focusName + ").",
-    ps.rt.focus === "primary"
+    "Focus: " + focusKey + " (" + focusName + ").",
+    focusKey === "primary"
       ? 'Narrate the active thread in second person as "you". Keep ' + ps.cfg.secondaryName + " in third person."
       : "Narrate " + ps.cfg.secondaryName + " in third person. Keep " + ps.cfg.primaryName + ' as the player-facing second-person thread.',
+    entering
+      ? "Perspective shift: resume only the current thread's local reality. The previous visible prose belonged to the offstage " + otherName + " thread."
+      : "Stay grounded in the current thread's local scene and knowledge instead of continuing offstage prose momentum.",
     ps.rt.together && ps.cfg.suspendTogether
       ? "Both protagonists are together. Do not force a perspective switch until they separate again."
       : "Use a soft switch rhythm around " + bounds.min + "-" + bounds.max + " turns. Current counter: " + ps.rt.turns + "/" + ps.rt.target + ".",
-    "Primary checkpoint: " + pSummary,
-    "Secondary checkpoint: " + sSummary
+    ps.rt.together
+      ? "Shared-scene rule: the protagonists may interact directly because both threads are currently together."
+      : "Separated-thread rule: do not import offstage people, facts, dialogue, or actions from " + otherName + "'s thread unless the current thread can directly perceive them.",
+    focusRole.scene || focusRole.knows || focusRole.next
+      ? "Current thread scene: " + focusScene
+      : "Current thread scene: establish a narrow local opening for " + focusName + " based only on what this thread can directly perceive right now.",
+    "Current thread knowledge: " + focusKnows,
+    "Current thread next step: " + focusNext,
+    "Current thread checkpoint: " + focusNote,
+    "Offstage continuity: " + offstage
   ]);
 
   const room = Math.max(120, ps.cfg.noteMax - PS_BLOCK_START.length - PS_BLOCK_END.length - 4);
@@ -990,8 +1058,8 @@ function planTask(ps, text) {
     return ps.rt.task;
   }
 
-  if (shouldAskSummary(ps)) {
-    setTask(ps, PS_TASK_SUMMARY, ps.rt.focus);
+  if (shouldAskThread(ps)) {
+    setTask(ps, PS_TASK_THREAD, ps.rt.focus);
     return ps.rt.task;
   }
 
@@ -1048,6 +1116,18 @@ function shouldAskSummary(ps) {
   return !(ps.rt.together && ps.cfg.suspendTogether) && ps.rt.turns + 1 >= ps.rt.target;
 }
 
+function shouldAskThread(ps) {
+  if (ps.rt.breakTurn === getTurn()) {
+    return true;
+  }
+
+  if (roleNeedsThread(ps.roles[ps.rt.focus])) {
+    return true;
+  }
+
+  return shouldAskSummary(ps);
+}
+
 function buildTaskLines(ps, task) {
   if (task === PS_TASK_PRESENCE) {
     return [
@@ -1056,10 +1136,10 @@ function buildTaskLines(ps, task) {
     ];
   }
 
-  if (task === PS_TASK_SUMMARY) {
+  if (task === PS_TASK_THREAD) {
     return [
-      "Control task: start the reply with exactly one line `(ps_summary=`one short factual checkpoint sentence`)`, then continue the story.",
-      "Keep that checkpoint to one short sentence about the active thread only, under 160 characters, with no dialogue."
+      "Control task: start the reply with exactly one line `(ps_thread scene=`...`; knows=`...`; next=`...`)`, then continue the story.",
+      "Write only the active thread. `scene` is the local scene, `knows` is what the active protagonist currently knows, and `next` is the most natural immediate step. Keep all three factual, short, and free of dialogue."
     ];
   }
 
@@ -1069,12 +1149,12 @@ function buildTaskLines(ps, task) {
 function parseTaskOutput(ps, text) {
   const raw = String(text || "");
   const presence = findPresenceValue(raw);
-  const summary = findSummaryValue(raw);
+  const thread = findThreadValue(raw);
   const task = getActiveTask(ps);
   return {
     story: sanitizeVisibleText(raw),
     presence: task === PS_TASK_PRESENCE ? presence : "",
-    summary: task === PS_TASK_SUMMARY ? clip(compact(summary, 180), ps.cfg.summaryMax) : ""
+    thread: task === PS_TASK_THREAD ? thread : null
   };
 }
 
@@ -1086,12 +1166,19 @@ function findPresenceValue(text) {
   return match[1].toLowerCase();
 }
 
-function findSummaryValue(text) {
-  const match = getTaskWindow(text).match(/\(\s*ps_summary\s*=\s*`([^`]{1,320})`\s*\)/i);
+function findThreadValue(text) {
+  const match = getTaskWindow(text).match(/\(\s*ps_thread\s+scene\s*=\s*`([^`]{1,220})`\s*;\s*knows\s*=\s*`([^`]{1,260})`\s*;\s*next\s*=\s*`([^`]{1,220})`\s*\)/i);
   if (!match) {
-    return "";
+    return null;
   }
-  return match[1];
+
+  const thread = {
+    scene: cleanThreadValue(match[1], 160),
+    knows: cleanThreadValue(match[2], 180),
+    next: cleanThreadValue(match[3], 160)
+  };
+
+  return isThreadValueValid(thread) ? thread : null;
 }
 
 function getTaskWindow(text) {
@@ -1105,6 +1192,7 @@ function sanitizeVisibleText(text) {
 function stripCtrl(text) {
   return String(text || "")
     .replace(/\s*\(\s*ps_presence\s*=\s*(?:together|separate|unclear)\s*\)\s*/ig, " ")
+    .replace(/\s*\(\s*ps_thread\s+scene\s*=\s*`[^`]{1,220}`\s*;\s*knows\s*=\s*`[^`]{1,260}`\s*;\s*next\s*=\s*`[^`]{1,220}`\s*\)\s*/ig, " ")
     .replace(/\s*\(\s*ps_summary\s*=\s*`[^`]{1,320}`\s*\)\s*/ig, " ")
     .replace(/\n?<PS>[\s\S]*?<\/PS>\n?/gi, "\n")
     .replace(/\s*<<[\s\S]*?>>\s*/g, " ");
@@ -1125,6 +1213,16 @@ function applyPresenceTask(ps, decision) {
   } else if (value === "separate") {
     setTogether(ps, false, "ai");
   }
+}
+
+function applyThreadTask(role, thread) {
+  if (!role || !thread || !isThreadValueValid(thread)) {
+    return;
+  }
+
+  role.scene = thread.scene;
+  role.knows = thread.knows;
+  role.next = thread.next;
 }
 
 function setTask(ps, kind, role) {
@@ -1485,6 +1583,8 @@ function buildStatus(ps) {
     "Switch window: " + bounds.min + "-" + bounds.max,
     "Current target: " + ps.rt.target,
     "Current counter: " + ps.rt.turns,
+    "Primary scene: " + (ps.roles.primary.scene || "(none)"),
+    "Secondary scene: " + (ps.roles.secondary.scene || "(none)"),
     "Primary checkpoint: " + (ps.roles.primary.handoff || ps.roles.primary.live || "(none)"),
     "Secondary checkpoint: " + (ps.roles.secondary.handoff || ps.roles.secondary.live || "(none)")
   ];
@@ -1662,7 +1762,7 @@ function sanitizeManual(value) {
 
 function sanitizeTask(value) {
   const lower = String(value || "").toLowerCase();
-  if (lower === PS_TASK_PRESENCE || lower === PS_TASK_SUMMARY) {
+  if (lower === PS_TASK_PRESENCE || lower === PS_TASK_THREAD) {
     return lower;
   }
   return PS_TASK_NONE;
@@ -1674,6 +1774,83 @@ function sanitizeTaskRole(value) {
     return lower;
   }
   return "";
+}
+
+function clearThreadState(role) {
+  if (!role) {
+    return;
+  }
+
+  role.scene = "";
+  role.knows = "";
+  role.next = "";
+}
+
+function roleNeedsThread(role) {
+  return !(role && role.scene && role.knows && role.next);
+}
+
+function buildThreadField(ps, key, field) {
+  const role = ps.roles[key];
+  const fallback = buildThreadFallback(ps, key, field);
+  const value = role && typeof role[field] === "string" ? role[field] : "";
+  return value || fallback;
+}
+
+function buildThreadFallback(ps, key, field) {
+  const role = ps.roles[key];
+  const name = getFocusName(ps, key);
+  const last = role && role.turns.length ? role.turns[role.turns.length - 1] : null;
+  const note = role && (role.handoff || role.live) ? (role.handoff || role.live) : "";
+
+  if (field === "scene") {
+    return last && last.output
+      ? clip(last.output, 160)
+      : "Start from " + name + "'s immediate local scene only.";
+  }
+
+  if (field === "knows") {
+    return note
+      ? clip(note, 180)
+      : name + " only knows what this thread has directly established so far.";
+  }
+
+  if (field === "next") {
+    return last && last.input
+      ? clip(last.input, 160)
+      : "Continue with the most immediate local action that fits " + name + "'s own thread.";
+  }
+
+  return "";
+}
+
+function buildOffstageNote(ps, key) {
+  const role = ps.roles[key];
+  const name = getFocusName(ps, key);
+  const note = buildThreadNote(ps, key) || role.handoff || role.live;
+  if (note) {
+    return clip(note, 180);
+  }
+  return name + " remains offstage and should not automatically leak into the active local scene.";
+}
+
+function cleanThreadValue(value, max) {
+  return clip(compact(String(value || ""), max), max);
+}
+
+function isThreadValueValid(thread) {
+  if (!thread || !thread.scene || !thread.knows || !thread.next) {
+    return false;
+  }
+
+  const joined = [thread.scene, thread.knows, thread.next].join(" ");
+  if (/["“”]/.test(joined)) {
+    return false;
+  }
+  if (/\b(?:ps_presence|ps_thread|ps_summary)\b/i.test(joined)) {
+    return false;
+  }
+  return true;
 }
 
 function clamp(value, min, max) {
