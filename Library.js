@@ -6,6 +6,7 @@ const PS_CARD_TITLE = "PS Settings";
 const PS_CARD_DESC = "Parallel Saros settings. Edit the fields below to configure the dual-protagonist script.";
 const PS_BLOCK_START = "<PS>";
 const PS_BLOCK_END = "</PS>";
+const PS_SHIFT_MARK = "----------------";
 
 const PS_TASK_NONE = "";
 const PS_TASK_PRESENCE = "presence";
@@ -27,6 +28,8 @@ const PS_PRESENCE_HINTS = [
 
 const PS_HELP = [
   "/psaros or /psaros status",
+  "/psaros enable",
+  "/psaros disable",
   "/psaros switch",
   "/psaros focus primary",
   "/psaros focus secondary",
@@ -35,6 +38,8 @@ const PS_HELP = [
   "/psaros debug on",
   "/psaros debug off"
 ].join("\n");
+
+const PS_ENABLED_LABEL = "Script Active";
 
 const PS_SKIP_CONJ = {
   am: true,
@@ -91,6 +96,24 @@ const PS_PAST_WORDS = {
   met: true
 };
 
+const PS_SPEECH_VERBS = [
+  "say",
+  "ask",
+  "reply",
+  "whisper",
+  "shout",
+  "tell",
+  "speak",
+  "mutter",
+  "murmur",
+  "answer",
+  "call",
+  "remark",
+  "admit",
+  "add",
+  "yell"
+];
+
 onLibraryPs();
 
 function onLibraryPs() {
@@ -111,6 +134,10 @@ function onInputPs(text) {
   }
 
   const ps = getPs();
+  if (!ps.rt.enabled) {
+    quiesceDisabled(ps);
+    return text;
+  }
   const cooked = shouldRewriteB(ps) ? rewriteB(text, ps.cfg.secondaryName, getType()) : text;
   savePending(ps, text, cooked);
   return cooked;
@@ -119,6 +146,10 @@ function onInputPs(text) {
 function onContextPs(text) {
   syncCfg();
   reconcile();
+  if (!getPs().rt.enabled) {
+    quiesceDisabled(getPs());
+    return text;
+  }
   return injectNote(text);
 }
 
@@ -135,6 +166,11 @@ function onOutputPs(text) {
     return msg;
   }
 
+  if (!ps.rt.enabled) {
+    quiesceDisabled(ps);
+    return sanitizeVisibleText(text);
+  }
+
   return recordTurn(ps, text, cycle);
 }
 
@@ -143,6 +179,7 @@ function getPs() {
     state.parallelSaros = {
       cfg: defaultCfg(),
       rt: {
+        enabled: true,
         focus: "primary",
         together: false,
         manual: "",
@@ -183,6 +220,7 @@ function getPs() {
 
 function defaultCfg() {
   return {
+    enabled: true,
     primaryName: "",
     secondaryName: "",
     center: 12,
@@ -244,6 +282,7 @@ function syncCfg() {
     return ps;
   }
 
+  const prevEnabled = parseBool(ps.rt && ps.rt.enabled, true);
   const cfg = loadCfg(card.entry || "", ps.cfg);
   const built = buildCfg(cfg);
 
@@ -253,6 +292,9 @@ function syncCfg() {
 
   ps.cfg = cfg;
   normalizeRt(ps);
+  if (prevEnabled !== cfg.enabled) {
+    setEnabledState(ps, cfg.enabled);
+  }
   debug(ps, "cfg synced");
   return ps;
 }
@@ -316,10 +358,11 @@ function initCard(card) {
 }
 
 // PS Settings used to expose a longer list of user-facing tuning fields here.
-// The card is intentionally minimal now: only the protagonist identities and the
-// switch center remain editable; the rest stays as internal defaults in code.
+// The card is intentionally minimal now: only the on/off toggle, protagonist
+// identities, and switch center remain editable; the rest stays internal.
 function buildCfg(cfg) {
   return [
+    PS_ENABLED_LABEL + ": " + String(parseBool(cfg.enabled, true)),
     "Primary Name: " + (cfg.primaryName || ""),
     "Secondary Name: " + (cfg.secondaryName || ""),
     "Switch Center: " + sanitizeEvery(cfg.center)
@@ -343,6 +386,7 @@ function loadCfg(entry, prevCfg) {
     cfg.debug = parseBool(prev.debug, cfg.debug);
   }
 
+  cfg.enabled = parseBool(getCfgLine(entry, PS_ENABLED_LABEL), cfg.enabled);
   cfg.primaryName = cleanName(getCfgLine(entry, "Primary Name"));
   cfg.secondaryName = cleanName(getCfgLine(entry, "Secondary Name"));
   cfg.center = sanitizeEvery(getCfgLine(entry, "Switch Center"));
@@ -361,6 +405,7 @@ function normalizeRt(ps) {
   const cfg = ps.cfg || defaultCfg();
   const rt = ps.rt;
 
+  rt.enabled = parseBool(rt.enabled, true);
   rt.focus = sanitizeFocus(rt.focus || cfg.startFocus);
   rt.together = parseBool(rt.together, false);
   rt.manual = sanitizeManual(rt.manual);
@@ -446,6 +491,7 @@ function reconcile(cycleHint) {
 function restoreRt(ps) {
   const last = ps.journal.length ? ps.journal[ps.journal.length - 1] : null;
 
+  ps.rt.enabled = last ? parseBool(last.enabled, true) : true;
   ps.rt.focus = last ? sanitizeFocus(last.focus) : sanitizeFocus(ps.cfg.startFocus);
   ps.rt.together = last ? parseBool(last.together, false) : false;
   ps.rt.manual = last ? sanitizeManual(last.manual) : "";
@@ -493,6 +539,39 @@ function clearPending(ps) {
   ps.track.pendingType = "";
   ps.track.pendingSig = "";
   ps.track.pendingTurn = -1;
+}
+
+function clearCycleMemory(ps) {
+  ps.track.lastType = "";
+  ps.track.lastText = "";
+  ps.track.lastSig = "";
+  ps.track.lastHash = "";
+  ps.track.lastProbe = "";
+  ps.track.lastKind = "";
+  ps.track.lastTurn = -1;
+  clearRetryCycle(ps);
+}
+
+// Keep the "disabled" path close to the examples: stop doing work early and
+// clear only volatile runtime signals so the core story state can resume later.
+function quiesceDisabled(ps) {
+  clearTask(ps);
+  clearPending(ps);
+  clearRetryCycle(ps);
+}
+
+function setEnabledState(ps, enabled) {
+  const next = parseBool(enabled, true);
+  ps.cfg.enabled = next;
+  ps.rt.enabled = next;
+  clearTask(ps);
+  clearPending(ps);
+  clearCycleMemory(ps);
+  ps.rt.lastSeen = -1;
+
+  if (!next) {
+    return;
+  }
 }
 
 function rememberPending(ps, raw, type) {
@@ -635,7 +714,25 @@ function recordTurn(ps, text, cycleHint) {
       } else {
         role.handoff = task === PS_TASK_SUMMARY ? (parsed.summary || role.live) : role.live;
         ps.rt.focus = flipFocus(focus);
+        const marked = addShiftMark(storyText);
         resetClock(ps);
+        ps.roles.primary.live = buildLive(ps, "primary");
+        ps.roles.secondary.live = buildLive(ps, "secondary");
+        finishTask(ps, task);
+        ps.rt.lastLogged = turn;
+        ps.rt.lastSeen = turn;
+        saveSnapshot(ps, turn, {
+          sig: cycle.sig,
+          hash: cycle.hash,
+          kind: cycle.kind,
+          aType: cycle.actionType,
+          aText: normalizeActionText(cycle.actionText),
+          probe: getResponseProbe(output)
+        });
+        rememberProcessedTurn(ps, cycle, output);
+        clearPending(ps);
+        debug(ps, "turn recorded");
+        return marked;
       }
     }
   }
@@ -657,6 +754,16 @@ function recordTurn(ps, text, cycleHint) {
   clearPending(ps);
   debug(ps, "turn recorded");
   return storyText;
+}
+
+function addShiftMark(text) {
+  const story = String(text || "").trimStart();
+  if (!story) {
+    return "\n" + PS_SHIFT_MARK + "\n";
+  }
+
+  const clean = story.replace(/^(?:-{3,}|[=_*]{3,})\s*\n+/g, "");
+  return "\n" + PS_SHIFT_MARK + "\n\n" + clean;
 }
 
 function hasTurn(ps, turn) {
@@ -693,6 +800,7 @@ function saveSnapshot(ps, turn, meta) {
   const data = meta || {};
   const item = {
     turn: turn,
+    enabled: ps.rt.enabled,
     focus: ps.rt.focus,
     together: ps.rt.together,
     turns: ps.rt.turns,
@@ -853,7 +961,7 @@ function stripBlock(text) {
 }
 
 function cleanOut(text) {
-  return compact(stripBlock(text).replace(/\s*<<[\s\S]*?>>\s*/g, " "), 260);
+  return compact(stripCtrl(text), 260);
 }
 
 function setTogether(ps, value, rule) {
@@ -964,44 +1072,54 @@ function buildTaskLines(ps, task) {
 
 function parseTaskOutput(ps, text) {
   const raw = String(text || "");
+  const presence = findPresenceValue(raw);
+  const summary = findSummaryValue(raw);
   const task = getActiveTask(ps);
-  if (task === PS_TASK_PRESENCE) {
-    return parsePresenceOutput(raw);
-  }
-  if (task === PS_TASK_SUMMARY) {
-    return parseSummaryOutput(ps, raw);
-  }
   return {
-    story: raw,
-    presence: "",
-    summary: ""
+    story: sanitizeVisibleText(raw),
+    presence: task === PS_TASK_PRESENCE ? presence : "",
+    summary: task === PS_TASK_SUMMARY ? clip(compact(summary, 180), ps.cfg.summaryMax) : ""
   };
 }
 
-function parsePresenceOutput(text) {
-  const match = String(text || "").match(/^\s*\(ps_presence\s*=\s*(together|separate|unclear)\s*\)\s*/i);
+function findPresenceValue(text) {
+  const match = getTaskWindow(text).match(/\(\s*ps_presence\s*=\s*(together|separate|unclear)\s*\)/i);
   if (!match) {
-    return { story: String(text || ""), presence: "", summary: "" };
+    return "";
   }
-
-  return {
-    story: String(text || "").slice(match[0].length),
-    presence: match[1].toLowerCase(),
-    summary: ""
-  };
+  return match[1].toLowerCase();
 }
 
-function parseSummaryOutput(ps, text) {
-  const match = String(text || "").match(/^\s*\(ps_summary\s*=\s*`([^`]{1,320})`\s*\)\s*/i);
+function findSummaryValue(text) {
+  const match = getTaskWindow(text).match(/\(\s*ps_summary\s*=\s*`([^`]{1,320})`\s*\)/i);
   if (!match) {
-    return { story: String(text || ""), presence: "", summary: "" };
+    return "";
   }
+  return match[1];
+}
 
-  return {
-    story: String(text || "").slice(match[0].length),
-    presence: "",
-    summary: clip(compact(match[1], 180), ps.cfg.summaryMax)
-  };
+function getTaskWindow(text) {
+  return String(text || "").slice(0, 420);
+}
+
+function sanitizeVisibleText(text) {
+  return tidyVisibleText(stripCtrl(text));
+}
+
+function stripCtrl(text) {
+  return String(text || "")
+    .replace(/\s*\(\s*ps_presence\s*=\s*(?:together|separate|unclear)\s*\)\s*/ig, " ")
+    .replace(/\s*\(\s*ps_summary\s*=\s*`[^`]{1,320}`\s*\)\s*/ig, " ")
+    .replace(/\n?<PS>[\s\S]*?<\/PS>\n?/gi, "\n")
+    .replace(/\s*<<[\s\S]*?>>\s*/g, " ");
+}
+
+function tidyVisibleText(text) {
+  return String(text || "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trimStart();
 }
 
 function applyPresenceTask(ps, decision) {
@@ -1080,6 +1198,11 @@ function rewriteB(text, name, type) {
     return raw;
   }
 
+  const quoted = rewriteQuotedSpeechSafe(trimmed, name);
+  if (quoted) {
+    return (lead || "> ") + quoted;
+  }
+
   if (/^["']/.test(trimmed) || type === "say") {
     return (lead || "> ") + rewriteSay(trimmed, name);
   }
@@ -1092,6 +1215,80 @@ function rewriteSay(body, name) {
     return name + " says " + body;
   }
   return name + " says, " + body;
+}
+
+function rewriteQuotedSpeech(body, name) {
+  const text = String(body || "").trim();
+  const quoteIndex = text.search(/["“]/);
+  if (quoteIndex < 1) {
+    return "";
+  }
+
+  const lead = text.slice(0, quoteIndex).trimEnd();
+  const quoted = text.slice(quoteIndex);
+  if (!isSpeechLead(lead)) {
+    return "";
+  }
+
+  const cookedLead = rewriteDo(lead, name).replace(/\s+$/, "");
+  return cookedLead + (/\s$/.test(cookedLead) || /^[,.;:!?]/.test(quoted) ? "" : " ") + quoted;
+}
+
+function isSpeechLead(text) {
+  const lead = String(text || "").trim().replace(/[,:;.!?\s]+$/, "");
+  if (!/^(?:you|i)\b/i.test(lead)) {
+    return false;
+  }
+  return hasPhrase(lead, PS_SPEECH_VERBS);
+}
+
+function rewriteQuotedSpeechSafe(body, name) {
+  const text = String(body || "").trim();
+  const quoteIndex = findSpeechQuoteIndexSafe(text);
+  if (quoteIndex < 1) {
+    return "";
+  }
+
+  const lead = text.slice(0, quoteIndex).trimEnd();
+  const quoted = text.slice(quoteIndex);
+  if (!isSpeechLeadSafe(lead)) {
+    return "";
+  }
+
+  const cookedLead = rewriteDo(lead, name).replace(/\s+$/, "");
+  return cookedLead + (/\s$/.test(cookedLead) || /^[,.;:!?]/.test(quoted) ? "" : " ") + quoted;
+}
+
+function isSpeechLeadSafe(text) {
+  const lead = String(text || "").trim().replace(/[,:;.!?\s]+$/, "");
+  if (!/^(?:you|i)\b/i.test(lead)) {
+    return false;
+  }
+  return hasPhrase(lead, PS_SPEECH_VERBS);
+}
+
+function findSpeechQuoteIndexSafe(text) {
+  const sample = String(text || "");
+  const doubleIndex = sample.search(/["“”]/);
+  if (doubleIndex !== -1) {
+    return doubleIndex;
+  }
+
+  for (let i = 0; i < sample.length; i += 1) {
+    const ch = sample.charAt(i);
+    if (ch !== "'" && ch !== "‘" && ch !== "’") {
+      continue;
+    }
+
+    const prev = i > 0 ? sample.charAt(i - 1) : "";
+    const next = i + 1 < sample.length ? sample.charAt(i + 1) : "";
+    if (/[A-Za-z]/.test(prev) && /[A-Za-z]/.test(next)) {
+      continue;
+    }
+    return i;
+  }
+
+  return -1;
 }
 
 function rewriteDo(body, name) {
@@ -1207,6 +1404,16 @@ function handleCmd(text) {
 
   if (lower === "/psaros" || lower === "/psaros status") {
     reply = buildStatus(ps);
+  } else if (lower === "/psaros enable") {
+    setEnabledState(ps, true);
+    saveCfg(ps.cfg);
+    saveSnapshot(ps, getTurn());
+    reply = "PS enabled.";
+  } else if (lower === "/psaros disable") {
+    setEnabledState(ps, false);
+    saveCfg(ps.cfg);
+    saveSnapshot(ps, getTurn());
+    reply = "PS disabled.";
   } else if (lower === "/psaros debug on") {
     ps.cfg.debug = true;
     saveCfg(ps.cfg);
@@ -1271,6 +1478,7 @@ function buildStatus(ps) {
     "Parallel Saros",
     "Settings card: " + PS_CARD_TITLE,
     "Configured: " + (isReady(ps.cfg) ? "yes" : "no"),
+    "Script active: " + String(ps.rt.enabled),
     "Primary: " + (ps.cfg.primaryName || "(blank)"),
     "Secondary: " + (ps.cfg.secondaryName || "(blank)"),
     "Focus: " + ps.rt.focus,
