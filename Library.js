@@ -955,7 +955,6 @@ function buildCtx(text) {
   }
 
   const task = planTask(ps, text);
-  const bounds = getBounds(ps.cfg);
   const turn = getTurn();
   const focusKey = ps.rt.focus;
   const otherKey = flipFocus(focusKey);
@@ -966,30 +965,25 @@ function buildCtx(text) {
   const focusScene = buildThreadField(ps, focusKey, "scene");
   const focusKnows = buildThreadField(ps, focusKey, "knows");
   const focusNext = buildThreadField(ps, focusKey, "next");
-  const focusNote = buildThreadNote(ps, focusKey) || "No current-thread checkpoint yet.";
-  const offstage = buildOffstageNote(ps, otherKey);
-  const lines = buildTaskLines(ps, task).concat([
-    "Focus: " + focusKey + " (" + focusName + ").",
+  const offstage = buildOffstageNote(ps, otherKey, entering);
+  const lines = ["<SYSTEM>"].concat(buildTaskLines(ps, task, entering), [
     focusKey === "primary"
-      ? 'Narrate the active thread in second person as "you". Keep ' + ps.cfg.secondaryName + " in third person."
-      : "Narrate " + ps.cfg.secondaryName + " in third person. Keep " + ps.cfg.primaryName + ' as the player-facing second-person thread.',
+      ? 'PoV: "you" in second person; keep ' + ps.cfg.secondaryName + " in third person."
+      : "PoV: " + ps.cfg.secondaryName + " third person; keep " + ps.cfg.primaryName + " as the second-person player thread.",
     entering
-      ? "Perspective shift: resume only the current thread's local reality. The previous visible prose belonged to the offstage " + otherName + " thread."
-      : "Stay grounded in the current thread's local scene and knowledge instead of continuing offstage prose momentum.",
-    ps.rt.together && ps.cfg.suspendTogether
-      ? "Both protagonists are together. Do not force a perspective switch until they separate again."
-      : "Use a soft switch rhythm around " + bounds.min + "-" + bounds.max + " turns. Current counter: " + ps.rt.turns + "/" + ps.rt.target + ".",
+      ? "Shift: offstage " + otherName + " ended. Resume " + focusName + " only."
+      : "Stay inside " + focusName + "'s local thread.",
     ps.rt.together
-      ? "Shared-scene rule: the protagonists may interact directly because both threads are currently together."
-      : "Separated-thread rule: do not import offstage people, facts, dialogue, or actions from " + otherName + "'s thread unless the current thread can directly perceive them.",
+      ? "Together: direct interaction is allowed."
+      : "Separate: no offstage imports from " + otherName + " unless directly perceived here.",
+    "Offstage: " + offstage,
     focusRole.scene || focusRole.knows || focusRole.next
-      ? "Current thread scene: " + focusScene
-      : "Current thread scene: establish a narrow local opening for " + focusName + " based only on what this thread can directly perceive right now.",
-    "Current thread knowledge: " + focusKnows,
-    "Current thread next step: " + focusNext,
-    "Current thread checkpoint: " + focusNote,
-    "Offstage continuity: " + offstage
-  ]);
+      ? "Scene: " + focusScene
+      : "Scene: establish a narrow local opening for " + focusName + " from direct perception only.",
+    "Knows: " + focusKnows,
+    "Next: " + focusNext,
+    "</SYSTEM>"
+  ]).filter(Boolean);
 
   const room = Math.max(120, ps.cfg.noteMax - PS_BLOCK_START.length - PS_BLOCK_END.length - 4);
   const body = clip(lines.join("\n"), room);
@@ -1128,18 +1122,21 @@ function shouldAskThread(ps) {
   return shouldAskSummary(ps);
 }
 
-function buildTaskLines(ps, task) {
+function buildTaskLines(ps, task, entering) {
   if (task === PS_TASK_PRESENCE) {
     return [
-      "Control task: start the reply with exactly one line `(ps_presence=together)` or `(ps_presence=separate)` or `(ps_presence=unclear)`, then continue the story.",
-      "Choose together only if both protagonists are clearly sharing the same scene now. Choose separate only if they are clearly apart. Choose unclear if the scene does not make this explicit."
+      "Task: start with exactly one line `(ps_presence=together)` or `(ps_presence=separate)` or `(ps_presence=unclear)`, then continue the story.",
+      "Choose together only for a clearly shared scene. Choose separate only for a clearly split scene. Otherwise choose unclear."
     ];
   }
 
   if (task === PS_TASK_THREAD) {
     return [
-      "Control task: start the reply with exactly one line `(ps_thread scene=`...`; knows=`...`; next=`...`)`, then continue the story.",
-      "Write only the active thread. `scene` is the local scene, `knows` is what the active protagonist currently knows, and `next` is the most natural immediate step. Keep all three factual, short, and free of dialogue."
+      "Task: start with `(ps_thread scene=`...`; knows=`...`; next=`...`)`, then continue.",
+      entering
+        ? "Shift turn: resume only the active protagonist's local thread."
+        : "Continue only the active protagonist's own thread.",
+      "`scene`=local scene, `knows`=current knowledge, `next`=immediate step. Keep them short and factual."
     ];
   }
 
@@ -1820,27 +1817,32 @@ function buildThreadFallback(ps, key, field) {
   if (field === "scene") {
     return last && last.output
       ? clip(last.output, 160)
-      : "Start from " + name + "'s immediate local scene only.";
+      : "Establish " + name + "'s immediate local scene from direct perception only.";
   }
 
   if (field === "knows") {
     return note
       ? clip(note, 180)
-      : name + " only knows what this thread has directly established so far.";
+      : name + " knows only this thread's established local facts.";
   }
 
   if (field === "next") {
-    return last && last.input
-      ? clip(last.input, 160)
-      : "Continue with the most immediate local action that fits " + name + "'s own thread.";
+    if (last && last.output) {
+      return "Follow the next local beat after: " + clip(last.output, 120);
+    }
+    return "Re-establish " + name + "'s immediate local beat.";
   }
 
   return "";
 }
 
-function buildOffstageNote(ps, key) {
+function buildOffstageNote(ps, key, entering) {
   const role = ps.roles[key];
   const name = getFocusName(ps, key);
+  if (entering && !ps.rt.together) {
+    return name + " stays offstage.";
+  }
+
   const note = buildThreadNote(ps, key) || role.handoff || role.live;
   if (note) {
     return clip(note, 180);
