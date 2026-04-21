@@ -709,6 +709,7 @@ function recordTurn(ps, text, cycleHint) {
   const storyText = parsed.story;
   const sceneOut = stripBlock(storyText).replace(/\s*<<[\s\S]*?>>\s*/g, " ");
   const output = compact(sceneOut, 260);
+  let switched = false;
 
   upsertTurn(role.turns, {
     turn: turn,
@@ -735,6 +736,7 @@ function recordTurn(ps, text, cycleHint) {
         role.handoff = buildThreadNote(ps, focus);
         ps.rt.focus = flipFocus(focus);
         ps.rt.breakTurn = turn + 1;
+        switched = true;
         resetClock(ps);
       }
     }
@@ -756,26 +758,28 @@ function recordTurn(ps, text, cycleHint) {
   rememberProcessedTurn(ps, cycle, output);
   clearPending(ps);
   debug(ps, "turn recorded");
-  return applyBreakMark(ps, storyText, turn);
+  return applyBreakMark(ps, storyText, turn, switched);
 }
 
-function applyBreakMark(ps, text, turn) {
-  if (ps.rt.breakTurn !== turn) {
-    return text;
+function applyBreakMark(ps, text, turn, switched) {
+  if (switched) {
+    return addShiftMark(text);
   }
 
-  ps.rt.breakTurn = -1;
-  return addShiftMark(text);
+  if (ps.rt.breakTurn === turn) {
+    ps.rt.breakTurn = -1;
+  }
+  return text;
 }
 
 function addShiftMark(text) {
-  const story = String(text || "").trimStart();
+  const story = String(text || "").trimEnd();
   if (!story) {
-    return "\n" + PS_SHIFT_MARK + "\n";
+    return PS_SHIFT_MARK;
   }
 
-  const clean = story.replace(/^(?:-{3,}|[=_*]{3,})\s*\n+/g, "");
-  return "\n" + PS_SHIFT_MARK + "\n\n" + clean;
+  const clean = story.replace(/\n+(?:-{3,}|[=_*]{3,})\s*$/g, "");
+  return clean + "\n\n" + PS_SHIFT_MARK;
 }
 
 function hasTurn(ps, turn) {
@@ -1529,27 +1533,25 @@ function handleCmd(text) {
     reply = "PS debug disabled.";
   } else if (lower === "/psaros switch") {
     if (isReady(ps.cfg)) {
-      ps.roles[ps.rt.focus].handoff = ps.roles[ps.rt.focus].live;
-      ps.rt.focus = flipFocus(ps.rt.focus);
-      clearTask(ps);
-      resetClock(ps);
-      saveSnapshot(ps, getTurn());
-      reply = "Focus switched to " + ps.rt.focus + ".";
+      queueFocusShift(ps, flipFocus(ps.rt.focus));
+      reply = "Focus switched to " + ps.rt.focus + ". Next story turn resumes that thread.";
     } else {
       reply = "PS is not configured yet. Fill in " + PS_CARD_TITLE + " first.";
     }
   } else if (lower === "/psaros focus primary") {
-    ps.rt.focus = "primary";
-    clearTask(ps);
-    resetClock(ps);
-    saveSnapshot(ps, getTurn());
-    reply = "Focus set to primary.";
+    if (ps.rt.focus === "primary") {
+      reply = "Focus already primary.";
+    } else {
+      queueFocusShift(ps, "primary");
+      reply = "Focus set to primary. Next story turn resumes that thread.";
+    }
   } else if (lower === "/psaros focus secondary") {
-    ps.rt.focus = "secondary";
-    clearTask(ps);
-    resetClock(ps);
-    saveSnapshot(ps, getTurn());
-    reply = "Focus set to secondary.";
+    if (ps.rt.focus === "secondary") {
+      reply = "Focus already secondary.";
+    } else {
+      queueFocusShift(ps, "secondary");
+      reply = "Focus set to secondary. Next story turn resumes that thread.";
+    }
   } else if (lower === "/psaros together") {
     ps.rt.together = true;
     ps.rt.manual = "together";
@@ -1570,6 +1572,26 @@ function handleCmd(text) {
 
   debug(ps, "command handled");
   return { handled: true, reply: reply };
+}
+
+function queueFocusShift(ps, target) {
+  const next = sanitizeFocus(target);
+  const current = ps.rt.focus;
+  if (current === next) {
+    return false;
+  }
+
+  const role = ps.roles[current];
+  if (role) {
+    role.handoff = buildThreadNote(ps, current) || role.live || role.handoff || "";
+  }
+
+  ps.rt.focus = next;
+  ps.rt.breakTurn = getTurn() + 1;
+  clearTask(ps);
+  resetClock(ps);
+  saveSnapshot(ps, getTurn());
+  return true;
 }
 
 function resetClock(ps) {
