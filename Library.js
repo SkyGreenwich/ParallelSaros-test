@@ -9,22 +9,7 @@ const PS_BLOCK_END = "</PS>";
 const PS_SHIFT_MARK = "----------------";
 
 const PS_TASK_NONE = "";
-const PS_TASK_PRESENCE = "presence";
-const PS_TASK_THREAD = "thread";
-const PS_TASK_CD = 2;
-const PS_PRESENCE_HINTS = [
-  "meet",
-  "find",
-  "search",
-  "look for",
-  "rejoin",
-  "join",
-  "leave",
-  "split",
-  "together",
-  "apart",
-  "same room"
-];
+const PS_TASK_STATE = "state";
 
 const PS_HELP = [
   "/psaros or /psaros status",
@@ -719,10 +704,8 @@ function recordTurn(ps, text, cycleHint) {
 
   role.live = buildLive(ps, focus);
 
-  if (task === PS_TASK_PRESENCE) {
-    applyPresenceTask(ps, parsed.presence);
-  } else if (task === PS_TASK_THREAD) {
-    applyThreadTask(role, parsed.thread);
+  if (task === PS_TASK_STATE) {
+    applyStateTask(ps, role, parsed.state, turn);
   }
 
   if (ps.rt.together && ps.cfg.suspendTogether) {
@@ -730,15 +713,11 @@ function recordTurn(ps, text, cycleHint) {
   } else {
     ps.rt.turns += 1;
     if (ps.rt.turns >= ps.rt.target) {
-      if (task === PS_TASK_PRESENCE) {
-        ps.rt.turns = Math.max(ps.rt.turns, ps.rt.target);
-      } else {
-        role.handoff = buildThreadNote(ps, focus);
-        ps.rt.focus = flipFocus(focus);
-        ps.rt.breakTurn = turn + 1;
-        switched = true;
-        resetClock(ps);
-      }
+      role.handoff = buildThreadNote(ps, focus);
+      ps.rt.focus = flipFocus(focus);
+      ps.rt.breakTurn = turn + 1;
+      switched = true;
+      resetClock(ps);
     }
   }
 
@@ -762,7 +741,7 @@ function recordTurn(ps, text, cycleHint) {
 }
 
 function applyBreakMark(ps, text, turn, switched) {
-  if (switched) {
+  if (switched || ps.rt.breakTurn === turn + 1) {
     return addShiftMark(text);
   }
 
@@ -775,11 +754,11 @@ function applyBreakMark(ps, text, turn, switched) {
 function addShiftMark(text) {
   const story = String(text || "").trimEnd();
   if (!story) {
-    return PS_SHIFT_MARK;
+    return PS_SHIFT_MARK + "\n\n";
   }
 
   const clean = story.replace(/\n+(?:-{3,}|[=_*]{3,})\s*$/g, "");
-  return clean + "\n\n" + PS_SHIFT_MARK;
+  return clean + "\n\n" + PS_SHIFT_MARK + "\n\n";
 }
 
 function hasTurn(ps, turn) {
@@ -975,8 +954,11 @@ function buildCtx(text) {
       ? 'PoV: "you" in second person; keep ' + ps.cfg.secondaryName + " in third person."
       : "PoV: " + ps.cfg.secondaryName + " third person; keep " + ps.cfg.primaryName + " as the second-person player thread.",
     entering
-      ? "Shift: offstage " + otherName + " ended. Resume " + focusName + " only."
+      ? "Shift: offstage " + otherName + " ended. Resume " + focusName + " only; do not continue " + otherName + "."
       : "Stay inside " + focusName + "'s local thread.",
+    entering
+      ? "Opening rule: first sentence must establish " + focusName + "'s immediate local scene or action."
+      : "",
     ps.rt.together
       ? "Together: direct interaction is allowed."
       : "Separate: no offstage imports from " + otherName + " unless directly perceived here.",
@@ -1051,49 +1033,12 @@ function planTask(ps, text) {
     return PS_TASK_NONE;
   }
 
-  if (shouldAskPresence(ps, text)) {
-    setTask(ps, PS_TASK_PRESENCE, "");
-    return ps.rt.task;
-  }
-
-  if (shouldAskThread(ps)) {
-    setTask(ps, PS_TASK_THREAD, ps.rt.focus);
+  if (shouldAskState(ps, text)) {
+    setTask(ps, PS_TASK_STATE, ps.rt.focus);
     return ps.rt.task;
   }
 
   return PS_TASK_NONE;
-}
-
-function shouldAskPresence(ps, text) {
-  if (ps.rt.manual || ps.rt.taskCd > 0) {
-    return false;
-  }
-
-  const seed = buildPresenceSeed(ps, text);
-  if (!seed) {
-    return false;
-  }
-
-  const lower = seed.toLowerCase();
-  const hasHint = hasPhrase(lower, PS_PRESENCE_HINTS);
-  if (!hasHint) {
-    return false;
-  }
-
-  const hasSecondary = hasName(lower, ps.cfg.secondaryName);
-  const hasPrimary = hasName(lower, ps.cfg.primaryName) || /\byou\b/.test(lower);
-  const pairCue = /\bboth\b|\beach other\b|\btogether\b|\bapart\b|\bsame room\b|\bface to face\b/.test(lower);
-  return pairCue || (hasSecondary && hasPrimary) || (ps.rt.focus === "primary" && hasSecondary) || (ps.rt.focus === "secondary" && hasPrimary);
-}
-
-function buildPresenceSeed(ps, text) {
-  const recent = getRecentText(4);
-  return [
-    ps.pending.raw,
-    ps.pending.cooked !== ps.pending.raw ? ps.pending.cooked : "",
-    recent,
-    compact(text, 900)
-  ].filter(Boolean).join("\n");
 }
 
 function getRecentText(max) {
@@ -1114,7 +1059,7 @@ function shouldAskSummary(ps) {
   return !(ps.rt.together && ps.cfg.suspendTogether) && ps.rt.turns + 1 >= ps.rt.target;
 }
 
-function shouldAskThread(ps) {
+function shouldAskState(ps) {
   if (ps.rt.breakTurn === getTurn()) {
     return true;
   }
@@ -1123,24 +1068,23 @@ function shouldAskThread(ps) {
     return true;
   }
 
-  return shouldAskSummary(ps);
+  if (shouldAskSummary(ps)) {
+    return true;
+  }
+
+  return true;
 }
 
 function buildTaskLines(ps, task, entering) {
-  if (task === PS_TASK_PRESENCE) {
+  if (task === PS_TASK_STATE) {
+    const focusName = getFocusName(ps, ps.rt.focus);
+    const otherName = getFocusName(ps, flipFocus(ps.rt.focus));
     return [
-      "Task: start with exactly one line `(ps_presence=together)` or `(ps_presence=separate)` or `(ps_presence=unclear)`, then continue the story.",
-      "Choose together only for a clearly shared scene. Choose separate only for a clearly split scene. Otherwise choose unclear."
-    ];
-  }
-
-  if (task === PS_TASK_THREAD) {
-    return [
-      "Task: start with `(ps_thread scene=`...`; knows=`...`; next=`...`)`, then continue.",
+      "Task: start with `(ps_state scene=`...`; knows=`...`; next=`...`; presence=together|separate|unclear)`, then continue.",
       entering
-        ? "Shift turn: resume only the active protagonist's local thread."
-        : "Continue only the active protagonist's own thread.",
-      "`scene`=local scene, `knows`=current knowledge, `next`=immediate step. Keep them short and factual."
+        ? "Shift turn: resume only " + focusName + "'s local thread; first sentence must establish " + focusName + ", not " + otherName + "."
+        : "Continue only the active protagonist's own local thread.",
+      "`scene`,`knows`,`next`,`presence` must stay short, factual, and dialogue-free."
     ];
   }
 
@@ -1149,41 +1093,32 @@ function buildTaskLines(ps, task, entering) {
 
 function parseTaskOutput(ps, text) {
   const raw = String(text || "");
-  const presence = findPresenceValue(raw);
-  const thread = findThreadValue(raw);
+  const statePacket = findStateValue(raw);
   const task = getActiveTask(ps);
   return {
     story: sanitizeVisibleText(raw),
-    presence: task === PS_TASK_PRESENCE ? presence : "",
-    thread: task === PS_TASK_THREAD ? thread : null
+    state: task === PS_TASK_STATE ? statePacket : null
   };
 }
 
-function findPresenceValue(text) {
-  const match = getTaskWindow(text).match(/\(\s*ps_presence\s*=\s*(together|separate|unclear)\s*\)/i);
-  if (!match) {
-    return "";
-  }
-  return match[1].toLowerCase();
-}
-
-function findThreadValue(text) {
-  const match = getTaskWindow(text).match(/\(\s*ps_thread\s+scene\s*=\s*`([^`]{1,220})`\s*;\s*knows\s*=\s*`([^`]{1,260})`\s*;\s*next\s*=\s*`([^`]{1,220})`\s*\)/i);
+function findStateValue(text) {
+  const match = getTaskWindow(text).match(/\(\s*ps_state\s+scene\s*=\s*`([^`]{1,220})`\s*;\s*knows\s*=\s*`([^`]{1,260})`\s*;\s*next\s*=\s*`([^`]{1,220})`\s*;\s*presence\s*=\s*(together|separate|unclear)\s*\)/i);
   if (!match) {
     return null;
   }
 
-  const thread = {
+  const statePacket = {
     scene: cleanThreadValue(match[1], 160),
     knows: cleanThreadValue(match[2], 180),
-    next: cleanThreadValue(match[3], 160)
+    next: cleanThreadValue(match[3], 160),
+    presence: match[4].toLowerCase()
   };
 
-  return isThreadValueValid(thread) ? thread : null;
+  return isStateValueValid(statePacket) ? statePacket : null;
 }
 
 function getTaskWindow(text) {
-  return String(text || "").slice(0, 420);
+  return String(text || "").slice(0, 560);
 }
 
 function sanitizeVisibleText(text) {
@@ -1192,6 +1127,7 @@ function sanitizeVisibleText(text) {
 
 function stripCtrl(text) {
   return stripLooseCtrl(String(text || "")
+    .replace(/\s*\(\s*ps_state\s+scene\s*=\s*`[^`]{1,220}`\s*;\s*knows\s*=\s*`[^`]{1,260}`\s*;\s*next\s*=\s*`[^`]{1,220}`\s*;\s*presence\s*=\s*(?:together|separate|unclear)\s*\)\s*/ig, " ")
     .replace(/\s*\(\s*ps_presence\s*=\s*(?:together|separate|unclear)\s*\)\s*/ig, " ")
     .replace(/\s*\(\s*ps_thread\s+scene\s*=\s*`[^`]{1,220}`\s*;\s*knows\s*=\s*`[^`]{1,260}`\s*;\s*next\s*=\s*`[^`]{1,220}`\s*\)\s*/ig, " ")
     .replace(/\s*\(\s*ps_summary\s*=\s*`[^`]{1,320}`\s*\)\s*/ig, " ")
@@ -1201,13 +1137,15 @@ function stripCtrl(text) {
 
 function stripLooseCtrl(text) {
   return String(text || "")
+    .replace(/\s*ps_state\s+scene\s*=\s*`[^`\n]{1,220}`\s*;\s*knows\s*=\s*`[^`\n]{1,260}`\s*;\s*next\s*=\s*`[^`\n]{1,220}`\s*;\s*presence\s*=\s*(?:together|separate|unclear)\b(?:\s*[.,;:!?-]*)\s*/ig, " ")
     .replace(/\s*ps_presence\s*=\s*(?:together|separate|unclear)\b(?:\s*[.,;:!?-]*)\s*/ig, " ")
     .replace(/\s*ps_thread\s+scene\s*=\s*`[^`\n]{1,220}`\s*;\s*knows\s*=\s*`[^`\n]{1,260}`\s*;\s*next\s*=\s*`[^`\n]{1,220}`(?:\s*[.,;:!?-]*)\s*/ig, " ")
     .replace(/\s*ps_summary\s*=\s*`[^`\n]{1,320}`(?:\s*[.,;:!?-]*)\s*/ig, " ")
+    .replace(/\s*\(\s*ps_state\b[\s\S]{0,720}?(?:\)|(?=\n)|$)\s*/ig, " ")
     .replace(/\s*\(\s*ps_presence\b[\s\S]{0,120}?(?:\)|(?=\n)|$)\s*/ig, " ")
     .replace(/\s*\(\s*ps_thread\b[\s\S]{0,560}?(?:\)|(?=\n)|$)\s*/ig, " ")
     .replace(/\s*\(\s*ps_summary\b[\s\S]{0,360}?(?:\)|(?=\n)|$)\s*/ig, " ")
-    .replace(/(^|\n)\s*ps_(?:presence|thread|summary)\b[^\n]{0,560}(?=\n|$)/ig, "$1")
+    .replace(/(^|\n)\s*ps_(?:state|presence|thread|summary)\b[^\n]{0,720}(?=\n|$)/ig, "$1")
     .replace(/\n?\s*<PS>[\s\S]{0,1200}?(?:<\/PS>|(?=\n\s*\n)|$)\s*/gi, "\n")
     .replace(/\n?\s*<\/?PS>\s*\n?/gi, "\n")
     .replace(/\s*<<[\s\S]{0,240}?(?:>>|(?=\n)|$)\s*/g, " ");
@@ -1221,23 +1159,26 @@ function tidyVisibleText(text) {
     .trimStart();
 }
 
-function applyPresenceTask(ps, decision) {
-  const value = String(decision || "").toLowerCase();
-  if (value === "together") {
-    setTogether(ps, true, "ai");
-  } else if (value === "separate") {
-    setTogether(ps, false, "ai");
-  }
-}
-
-function applyThreadTask(role, thread) {
-  if (!role || !thread || !isThreadValueValid(thread)) {
+function applyStateTask(ps, role, packet, turn) {
+  if (!ps || !role || !packet || !isStateValueValid(packet)) {
     return;
   }
 
-  role.scene = thread.scene;
-  role.knows = thread.knows;
-  role.next = thread.next;
+  role.scene = packet.scene;
+  role.knows = packet.knows;
+  role.next = packet.next;
+
+  if (!ps.rt.manual) {
+    if (packet.presence === "together") {
+      setTogether(ps, true, "ai");
+    } else if (packet.presence === "separate") {
+      setTogether(ps, false, "ai");
+    }
+  }
+
+  ps.rt.taskCd = 0;
+  ps.rt.taskTry = 1;
+  ps.rt.taskTurn = turn;
 }
 
 function setTask(ps, kind, role) {
@@ -1255,12 +1196,6 @@ function clearTask(ps) {
 }
 
 function finishTask(ps, task) {
-  if (task === PS_TASK_PRESENCE) {
-    ps.rt.taskCd = PS_TASK_CD;
-  } else if (ps.rt.taskCd > 0) {
-    ps.rt.taskCd -= 1;
-  }
-
   clearTask(ps);
 }
 
@@ -1795,7 +1730,7 @@ function sanitizeManual(value) {
 
 function sanitizeTask(value) {
   const lower = String(value || "").toLowerCase();
-  if (lower === PS_TASK_PRESENCE || lower === PS_TASK_THREAD) {
+  if (lower === PS_TASK_STATE) {
     return lower;
   }
   return PS_TASK_NONE;
@@ -1876,16 +1811,20 @@ function cleanThreadValue(value, max) {
   return clip(compact(String(value || ""), max), max);
 }
 
-function isThreadValueValid(thread) {
-  if (!thread || !thread.scene || !thread.knows || !thread.next) {
+function isStateValueValid(packet) {
+  if (!packet || !packet.scene || !packet.knows || !packet.next) {
     return false;
   }
 
-  const joined = [thread.scene, thread.knows, thread.next].join(" ");
+  if (!/^(?:together|separate|unclear)$/i.test(packet.presence || "")) {
+    return false;
+  }
+
+  const joined = [packet.scene, packet.knows, packet.next, packet.presence].join(" ");
   if (/["“”]/.test(joined)) {
     return false;
   }
-  if (/\b(?:ps_presence|ps_thread|ps_summary)\b/i.test(joined)) {
+  if (/\b(?:ps_state|ps_presence|ps_thread|ps_summary)\b/i.test(joined)) {
     return false;
   }
   return true;
