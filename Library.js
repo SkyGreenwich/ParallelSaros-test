@@ -1190,12 +1190,26 @@ function sanitizeVisibleText(text) {
 }
 
 function stripCtrl(text) {
-  return String(text || "")
+  return stripLooseCtrl(String(text || "")
     .replace(/\s*\(\s*ps_presence\s*=\s*(?:together|separate|unclear)\s*\)\s*/ig, " ")
     .replace(/\s*\(\s*ps_thread\s+scene\s*=\s*`[^`]{1,220}`\s*;\s*knows\s*=\s*`[^`]{1,260}`\s*;\s*next\s*=\s*`[^`]{1,220}`\s*\)\s*/ig, " ")
     .replace(/\s*\(\s*ps_summary\s*=\s*`[^`]{1,320}`\s*\)\s*/ig, " ")
     .replace(/\n?<PS>[\s\S]*?<\/PS>\n?/gi, "\n")
-    .replace(/\s*<<[\s\S]*?>>\s*/g, " ");
+    .replace(/\s*<<[\s\S]*?>>\s*/g, " "));
+}
+
+function stripLooseCtrl(text) {
+  return String(text || "")
+    .replace(/\s*ps_presence\s*=\s*(?:together|separate|unclear)\b(?:\s*[.,;:!?-]*)\s*/ig, " ")
+    .replace(/\s*ps_thread\s+scene\s*=\s*`[^`\n]{1,220}`\s*;\s*knows\s*=\s*`[^`\n]{1,260}`\s*;\s*next\s*=\s*`[^`\n]{1,220}`(?:\s*[.,;:!?-]*)\s*/ig, " ")
+    .replace(/\s*ps_summary\s*=\s*`[^`\n]{1,320}`(?:\s*[.,;:!?-]*)\s*/ig, " ")
+    .replace(/\s*\(\s*ps_presence\b[\s\S]{0,120}?(?:\)|(?=\n)|$)\s*/ig, " ")
+    .replace(/\s*\(\s*ps_thread\b[\s\S]{0,560}?(?:\)|(?=\n)|$)\s*/ig, " ")
+    .replace(/\s*\(\s*ps_summary\b[\s\S]{0,360}?(?:\)|(?=\n)|$)\s*/ig, " ")
+    .replace(/(^|\n)\s*ps_(?:presence|thread|summary)\b[^\n]{0,560}(?=\n|$)/ig, "$1")
+    .replace(/\n?\s*<PS>[\s\S]{0,1200}?(?:<\/PS>|(?=\n\s*\n)|$)\s*/gi, "\n")
+    .replace(/\n?\s*<\/?PS>\s*\n?/gi, "\n")
+    .replace(/\s*<<[\s\S]{0,240}?(?:>>|(?=\n)|$)\s*/g, " ");
 }
 
 function tidyVisibleText(text) {
