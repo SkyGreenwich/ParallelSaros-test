@@ -12,92 +12,12 @@ const PS_TASK_NONE = "";
 const PS_TASK_STATE = "state";
 
 const PS_HELP = [
-  "/psaros or /psaros status",
-  "/psaros enable",
-  "/psaros disable",
-  "/psaros switch",
-  "/psaros focus primary",
-  "/psaros focus secondary",
-  "/psaros together",
-  "/psaros split",
-  "/psaros debug on",
-  "/psaros debug off"
+  "/saros switch",
+  "/saros together",
+  "/saros split"
 ].join("\n");
 
 const PS_ENABLED_LABEL = "Script Active";
-
-const PS_SKIP_CONJ = {
-  am: true,
-  are: true,
-  is: true,
-  was: true,
-  were: true,
-  be: true,
-  been: true,
-  being: true,
-  do: true,
-  does: true,
-  did: true,
-  have: true,
-  has: true,
-  had: true,
-  will: true,
-  would: true,
-  shall: true,
-  should: true,
-  can: true,
-  cannot: true,
-  could: true,
-  may: true,
-  might: true,
-  must: true,
-  ought: true,
-  need: true
-};
-
-const PS_PAST_WORDS = {
-  went: true,
-  came: true,
-  saw: true,
-  found: true,
-  felt: true,
-  left: true,
-  took: true,
-  gave: true,
-  made: true,
-  knew: true,
-  thought: true,
-  brought: true,
-  kept: true,
-  said: true,
-  told: true,
-  ran: true,
-  held: true,
-  read: true,
-  sat: true,
-  stood: true,
-  won: true,
-  lost: true,
-  met: true
-};
-
-const PS_SPEECH_VERBS = [
-  "say",
-  "ask",
-  "reply",
-  "whisper",
-  "shout",
-  "tell",
-  "speak",
-  "mutter",
-  "murmur",
-  "answer",
-  "call",
-  "remark",
-  "admit",
-  "add",
-  "yell"
-];
 
 onLibraryPs();
 
@@ -123,9 +43,8 @@ function onInputPs(text) {
     quiesceDisabled(ps);
     return text;
   }
-  const cooked = shouldRewriteB(ps) ? rewriteB(text, ps.cfg.secondaryName, getType()) : text;
-  savePending(ps, text, cooked);
-  return cooked;
+  savePending(ps, text, text);
+  return text;
 }
 
 function onContextPs(text) {
@@ -708,8 +627,17 @@ function recordTurn(ps, text, cycleHint) {
     applyStateTask(ps, role, parsed.state, turn);
   }
 
-  if (ps.rt.together && ps.cfg.suspendTogether) {
-    ps.rt.turns = 0;
+  if (ps.rt.together) {
+    if (focus === "secondary") {
+      role.handoff = buildThreadNote(ps, focus);
+      ps.rt.focus = "primary";
+      ps.rt.breakTurn = turn + 1;
+      switched = true;
+      resetClock(ps);
+    } else {
+      ps.rt.focus = "primary";
+      ps.rt.turns = 0;
+    }
   } else {
     ps.rt.turns += 1;
     if (ps.rt.turns >= ps.rt.target) {
@@ -948,31 +876,30 @@ function buildCtx(text) {
   const focusScene = buildThreadField(ps, focusKey, "scene");
   const focusKnows = buildThreadField(ps, focusKey, "knows");
   const focusNext = buildThreadField(ps, focusKey, "next");
-  const offstage = buildOffstageNote(ps, otherKey, entering);
-  const lines = ["<SYSTEM>"].concat(buildTaskLines(ps, task, entering), [
-    focusKey === "primary"
-      ? 'PoV: "you" in second person; keep ' + ps.cfg.secondaryName + " in third person."
-      : "PoV: " + ps.cfg.secondaryName + " third person; keep " + ps.cfg.primaryName + " as the second-person player thread.",
+  const otherState = buildOtherState(ps, otherKey, entering);
+  const resumeLine = buildResumeLine(ps, focusKey, entering);
+  const lines = ["<SYSTEM>"].concat(buildTaskLines(ps, task, entering), buildIdentityLines(ps, focusKey, otherKey, entering), [
     entering
-      ? "Shift: offstage " + otherName + " ended. Resume " + focusName + " only; do not continue " + otherName + "."
+      ? "Shift: resume " + focusName + " only; do not continue " + otherName + "."
       : "Stay inside " + focusName + "'s local thread.",
     entering
-      ? "Opening rule: first sentence must establish " + focusName + "'s immediate local scene or action."
+      ? "Open on " + focusName + "'s immediate scene or action."
       : "",
-    ps.rt.together
-      ? "Together: direct interaction is allowed."
-      : "Separate: no offstage imports from " + otherName + " unless directly perceived here.",
-    "Offstage: " + offstage,
+    resumeLine,
     focusRole.scene || focusRole.knows || focusRole.next
       ? "Scene: " + focusScene
       : "Scene: establish a narrow local opening for " + focusName + " from direct perception only.",
     "Knows: " + focusKnows,
     "Next: " + focusNext,
+    ps.rt.together
+      ? 'Together: stay with ' + focusName + ' as "you"; ' + otherName + " shares the scene."
+      : "Separate: keep " + otherName + " offstage unless directly perceived here.",
+    otherState,
     "</SYSTEM>"
   ]).filter(Boolean);
 
   const room = Math.max(120, ps.cfg.noteMax - PS_BLOCK_START.length - PS_BLOCK_END.length - 4);
-  const body = clip(lines.join("\n"), room);
+  const body = joinBoundedLines(lines, room);
   return PS_BLOCK_START + "\n" + body + "\n" + PS_BLOCK_END;
 }
 
@@ -1004,18 +931,46 @@ function stripBlock(text) {
   return String(text || "").replace(/\n?<PS>[\s\S]*?<\/PS>\n?/g, "\n").trimStart();
 }
 
+function joinBoundedLines(lines, room) {
+  const clean = lines.filter(Boolean);
+  if (!clean.length) {
+    return "";
+  }
+  if (clean.length === 1) {
+    return clip(clean[0], room);
+  }
+
+  const head = clean[0];
+  const tail = clean[clean.length - 1];
+  const middle = [];
+  let used = head.length + 1 + tail.length;
+
+  for (let i = 1; i < clean.length - 1; i += 1) {
+    const line = clean[i];
+    const cost = 1 + line.length;
+    if (used + cost > room) {
+      break;
+    }
+    middle.push(line);
+    used += cost;
+  }
+
+  return [head].concat(middle, [tail]).join("\n");
+}
+
 function cleanOut(text) {
   return compact(stripCtrl(text), 260);
 }
 
 function setTogether(ps, value, rule) {
-  if (ps.rt.together === value) {
+  const next = !!value;
+  if (ps.rt.together === next) {
     return;
   }
 
-  ps.rt.together = value;
+  ps.rt.together = next;
   resetClock(ps);
-  debug(ps, "presence " + (value ? "together" : "separate") + (rule ? " via " + rule : ""));
+  debug(ps, "presence " + (next ? "together" : "separate") + (rule ? " via " + rule : ""));
 }
 
 function getActiveTask(ps) {
@@ -1082,9 +1037,9 @@ function buildTaskLines(ps, task, entering) {
     return [
       "Task: start with `(ps_state scene=`...`; knows=`...`; next=`...`; presence=together|separate|unclear)`, then continue.",
       entering
-        ? "Shift turn: resume only " + focusName + "'s local thread; first sentence must establish " + focusName + ", not " + otherName + "."
+        ? 'Shift turn: only ' + focusName + '\'s thread. "you" = ' + focusName + ", not " + otherName + "."
         : "Continue only the active protagonist's own local thread.",
-      "`scene`,`knows`,`next`,`presence` must stay short, factual, and dialogue-free."
+      "State fields stay short, factual, and dialogue-free."
     ];
   }
 
@@ -1438,7 +1393,7 @@ function conj(text) {
 
 function handleCmd(text) {
   const raw = String(text || "").trim();
-  if (!/^\/psaros\b/i.test(raw)) {
+  if (!/^\/saros\b/i.test(raw)) {
     return { handled: false, reply: "" };
   }
 
@@ -1446,63 +1401,36 @@ function handleCmd(text) {
   const lower = raw.toLowerCase();
   let reply = "";
 
-  if (lower === "/psaros" || lower === "/psaros status") {
-    reply = buildStatus(ps);
-  } else if (lower === "/psaros enable") {
-    setEnabledState(ps, true);
-    saveCfg(ps.cfg);
-    saveSnapshot(ps, getTurn());
-    reply = "PS enabled.";
-  } else if (lower === "/psaros disable") {
-    setEnabledState(ps, false);
-    saveCfg(ps.cfg);
-    saveSnapshot(ps, getTurn());
-    reply = "PS disabled.";
-  } else if (lower === "/psaros debug on") {
-    ps.cfg.debug = true;
-    saveCfg(ps.cfg);
-    reply = "PS debug enabled.";
-  } else if (lower === "/psaros debug off") {
-    ps.cfg.debug = false;
-    saveCfg(ps.cfg);
-    reply = "PS debug disabled.";
-  } else if (lower === "/psaros switch") {
+  if (lower === "/saros switch") {
     if (isReady(ps.cfg)) {
-      queueFocusShift(ps, flipFocus(ps.rt.focus));
-      reply = "Focus switched to " + ps.rt.focus + ". Next story turn resumes that thread.";
+      if (ps.rt.together) {
+        reply = "PS is locked to primary while together. Use /saros split first.";
+      } else {
+        queueFocusShift(ps, flipFocus(ps.rt.focus));
+        reply = "Focus switched to " + ps.rt.focus + ". Next story turn resumes that thread.";
+      }
     } else {
       reply = "PS is not configured yet. Fill in " + PS_CARD_TITLE + " first.";
     }
-  } else if (lower === "/psaros focus primary") {
-    if (ps.rt.focus === "primary") {
-      reply = "Focus already primary.";
-    } else {
-      queueFocusShift(ps, "primary");
-      reply = "Focus set to primary. Next story turn resumes that thread.";
-    }
-  } else if (lower === "/psaros focus secondary") {
+  } else if (lower === "/saros together") {
     if (ps.rt.focus === "secondary") {
-      reply = "Focus already secondary.";
-    } else {
-      queueFocusShift(ps, "secondary");
-      reply = "Focus set to secondary. Next story turn resumes that thread.";
+      ps.roles.secondary.handoff = buildThreadNote(ps, "secondary") || ps.roles.secondary.live || ps.roles.secondary.handoff || "";
     }
-  } else if (lower === "/psaros together") {
-    ps.rt.together = true;
+    setTogether(ps, true, "manual");
     ps.rt.manual = "together";
+    ps.rt.focus = "primary";
+    ps.rt.breakTurn = -1;
     clearTask(ps);
-    resetClock(ps);
     saveSnapshot(ps, getTurn());
     reply = "Protagonists marked as together.";
-  } else if (lower === "/psaros split") {
-    ps.rt.together = false;
+  } else if (lower === "/saros split") {
+    setTogether(ps, false, "manual");
     ps.rt.manual = "separate";
     clearTask(ps);
-    resetClock(ps);
     saveSnapshot(ps, getTurn());
     reply = "Protagonists marked as separate.";
   } else {
-    reply = buildStatus(ps) + "\n\nCommands:\n" + PS_HELP;
+    reply = "Commands:\n" + PS_HELP;
   }
 
   debug(ps, "command handled");
@@ -1532,32 +1460,6 @@ function queueFocusShift(ps, target) {
 function resetClock(ps) {
   ps.rt.turns = 0;
   ps.rt.target = nextTarget(ps);
-}
-
-function buildStatus(ps) {
-  const bounds = getBounds(ps.cfg);
-  const lines = [
-    "Parallel Saros",
-    "Settings card: " + PS_CARD_TITLE,
-    "Configured: " + (isReady(ps.cfg) ? "yes" : "no"),
-    "Script active: " + String(ps.rt.enabled),
-    "Primary: " + (ps.cfg.primaryName || "(blank)"),
-    "Secondary: " + (ps.cfg.secondaryName || "(blank)"),
-    "Focus: " + ps.rt.focus,
-    "Together: " + String(ps.rt.together),
-    "Presence lock: " + (ps.rt.manual || "auto"),
-    "Task: " + (getActiveTask(ps) || "none") + (ps.rt.taskCd ? " (cooldown " + ps.rt.taskCd + ")" : ""),
-    "Switch center/flex: " + ps.cfg.center + " +/- " + ps.cfg.flex,
-    "Switch window: " + bounds.min + "-" + bounds.max,
-    "Current target: " + ps.rt.target,
-    "Current counter: " + ps.rt.turns,
-    "Primary scene: " + (ps.roles.primary.scene || "(none)"),
-    "Secondary scene: " + (ps.roles.secondary.scene || "(none)"),
-    "Primary checkpoint: " + (ps.roles.primary.handoff || ps.roles.primary.live || "(none)"),
-    "Secondary checkpoint: " + (ps.roles.secondary.handoff || ps.roles.secondary.live || "(none)")
-  ];
-
-  return lines.join("\n");
 }
 
 function isReady(cfg) {
@@ -1765,6 +1667,27 @@ function buildThreadField(ps, key, field) {
   return value || fallback;
 }
 
+function buildIdentityLines(ps, focusKey, otherKey, entering) {
+  const focusName = getFocusName(ps, focusKey);
+  const otherName = getFocusName(ps, otherKey);
+  return [
+    entering
+      ? 'Identity: "you" = ' + focusName + ", not " + otherName + "."
+      : 'Identity: "you" = ' + focusName + ".",
+    'Boundary: ' + otherName + ' is never "you" in this turn.'
+  ];
+}
+
+function buildResumeLine(ps, key, entering) {
+  const role = ps.roles[key];
+  const anchor = role && (role.handoff || role.live) ? (role.handoff || role.live) : "";
+  if (!anchor) {
+    return "";
+  }
+
+  return (entering ? "Resume: " : "Thread anchor: ") + clip(anchor, 160);
+}
+
 function buildThreadFallback(ps, key, field) {
   const role = ps.roles[key];
   const name = getFocusName(ps, key);
@@ -1793,18 +1716,26 @@ function buildThreadFallback(ps, key, field) {
   return "";
 }
 
-function buildOffstageNote(ps, key, entering) {
+function buildOtherState(ps, key, entering) {
   const role = ps.roles[key];
   const name = getFocusName(ps, key);
-  if (entering && !ps.rt.together) {
-    return name + " stays offstage.";
+  const note = buildThreadNote(ps, key) || role.handoff || role.live;
+
+  if (ps.rt.together) {
+    if (note) {
+      return "Other in scene: " + clip(name + " shares the scene as another character. " + note, 220);
+    }
+    return 'Other in scene: ' + name + ' shares the scene, but remains a separate character and never becomes "you".';
   }
 
-  const note = buildThreadNote(ps, key) || role.handoff || role.live;
-  if (note) {
-    return clip(note, 180);
+  if (entering) {
+    return "Offstage: " + name + " stays offstage.";
   }
-  return name + " remains offstage and should not automatically leak into the active local scene.";
+
+  if (note) {
+    return "Offstage: " + clip(note, 180);
+  }
+  return "Offstage: " + name + " remains offstage and should not automatically leak into the active local scene.";
 }
 
 function cleanThreadValue(value, max) {
