@@ -1080,38 +1080,81 @@ function sanitizeVisibleText(text) {
   return tidyVisibleText(stripCtrl(text));
 }
 
+function ctrlGap(match, fallback, offset, source) {
+  const raw = String(match || "");
+  const lead = (raw.match(/^\s*/) || [""])[0];
+  const tail = (raw.match(/\s*$/) || [""])[0];
+  const edge = lead + tail;
+
+  if (/\n{2,}/.test(edge)) {
+    return "\n\n";
+  }
+  if (/\n/.test(edge)) {
+    return "\n";
+  }
+  if (/[ \t]/.test(edge)) {
+    return " ";
+  }
+
+  const prev = typeof offset === "number" && source ? String(source[offset - 1] || "") : "";
+  const next = typeof offset === "number" && source ? String(source[offset + raw.length] || "") : "";
+  if (prev && next && !/\s/.test(prev) && !/\s/.test(next)) {
+    return fallback || "";
+  }
+  return "";
+}
+
+function ctrlLooseGap(match, fallback, offset, source) {
+  const raw = String(match || "");
+  const lead = (raw.match(/^\s*/) || [""])[0];
+  const tail = (raw.match(/\s*$/) || [""])[0];
+  const edge = lead + tail;
+
+  if (/\s/.test(edge)) {
+    return " ";
+  }
+
+  const prev = typeof offset === "number" && source ? String(source[offset - 1] || "") : "";
+  const next = typeof offset === "number" && source ? String(source[offset + raw.length] || "") : "";
+  if (prev && next && !/\s/.test(prev) && !/\s/.test(next)) {
+    return fallback === "\n" ? " " : (fallback || " ");
+  }
+  return "";
+}
+
 function stripCtrl(text) {
   return stripLooseCtrl(String(text || "")
-    .replace(/\s*\(\s*ps_state\s+scene\s*=\s*`[^`]{1,220}`\s*;\s*knows\s*=\s*`[^`]{1,260}`\s*;\s*next\s*=\s*`[^`]{1,220}`\s*;\s*presence\s*=\s*(?:together|separate|unclear)\s*\)\s*/ig, " ")
-    .replace(/\s*\(\s*ps_presence\s*=\s*(?:together|separate|unclear)\s*\)\s*/ig, " ")
-    .replace(/\s*\(\s*ps_thread\s+scene\s*=\s*`[^`]{1,220}`\s*;\s*knows\s*=\s*`[^`]{1,260}`\s*;\s*next\s*=\s*`[^`]{1,220}`\s*\)\s*/ig, " ")
-    .replace(/\s*\(\s*ps_summary\s*=\s*`[^`]{1,320}`\s*\)\s*/ig, " ")
-    .replace(/\n?<PS>[\s\S]*?<\/PS>\n?/gi, "\n")
-    .replace(/\s*<<[\s\S]*?>>\s*/g, " "));
+    .replace(/\s*\(\s*ps_state\s+scene\s*=\s*`[^`]{1,220}`\s*;\s*knows\s*=\s*`[^`]{1,260}`\s*;\s*next\s*=\s*`[^`]{1,220}`\s*;\s*presence\s*=\s*(?:together|separate|unclear)\s*\)\s*/ig, (m, off, src) => ctrlGap(m, " ", off, src))
+    .replace(/\s*\(\s*ps_presence\s*=\s*(?:together|separate|unclear)\s*\)\s*/ig, (m, off, src) => ctrlGap(m, " ", off, src))
+    .replace(/\s*\(\s*ps_thread\s+scene\s*=\s*`[^`]{1,220}`\s*;\s*knows\s*=\s*`[^`]{1,260}`\s*;\s*next\s*=\s*`[^`]{1,220}`\s*\)\s*/ig, (m, off, src) => ctrlGap(m, " ", off, src))
+    .replace(/\s*\(\s*ps_summary\s*=\s*`[^`]{1,320}`\s*\)\s*/ig, (m, off, src) => ctrlGap(m, " ", off, src))
+    .replace(/\n?<PS>[\s\S]*?<\/PS>\n?/gi, (m, off, src) => ctrlGap(m, "\n", off, src))
+    .replace(/\s*<<[\s\S]*?>>\s*/g, (m, off, src) => ctrlGap(m, " ", off, src)));
 }
 
 function stripLooseCtrl(text) {
   return String(text || "")
-    .replace(/\s*ps_state\s+scene\s*=\s*`[^`\n]{1,220}`\s*;\s*knows\s*=\s*`[^`\n]{1,260}`\s*;\s*next\s*=\s*`[^`\n]{1,220}`\s*;\s*presence\s*=\s*(?:together|separate|unclear)\b(?:\s*[.,;:!?-]*)\s*/ig, " ")
-    .replace(/\s*ps_presence\s*=\s*(?:together|separate|unclear)\b(?:\s*[.,;:!?-]*)\s*/ig, " ")
-    .replace(/\s*ps_thread\s+scene\s*=\s*`[^`\n]{1,220}`\s*;\s*knows\s*=\s*`[^`\n]{1,260}`\s*;\s*next\s*=\s*`[^`\n]{1,220}`(?:\s*[.,;:!?-]*)\s*/ig, " ")
-    .replace(/\s*ps_summary\s*=\s*`[^`\n]{1,320}`(?:\s*[.,;:!?-]*)\s*/ig, " ")
-    .replace(/\s*\(\s*ps_state\b[\s\S]{0,720}?(?:\)|(?=\n)|$)\s*/ig, " ")
-    .replace(/\s*\(\s*ps_presence\b[\s\S]{0,120}?(?:\)|(?=\n)|$)\s*/ig, " ")
-    .replace(/\s*\(\s*ps_thread\b[\s\S]{0,560}?(?:\)|(?=\n)|$)\s*/ig, " ")
-    .replace(/\s*\(\s*ps_summary\b[\s\S]{0,360}?(?:\)|(?=\n)|$)\s*/ig, " ")
+    .replace(/\s*ps_state\s+scene\s*=\s*`[^`\n]{1,220}`\s*;\s*knows\s*=\s*`[^`\n]{1,260}`\s*;\s*next\s*=\s*`[^`\n]{1,220}`\s*;\s*presence\s*=\s*(?:together|separate|unclear)\b(?:\s*[.,;:!?-]*)\s*/ig, (m, off, src) => ctrlLooseGap(m, " ", off, src))
+    .replace(/\s*ps_presence\s*=\s*(?:together|separate|unclear)\b(?:\s*[.,;:!?-]*)\s*/ig, (m, off, src) => ctrlLooseGap(m, " ", off, src))
+    .replace(/\s*ps_thread\s+scene\s*=\s*`[^`\n]{1,220}`\s*;\s*knows\s*=\s*`[^`\n]{1,260}`\s*;\s*next\s*=\s*`[^`\n]{1,220}`(?:\s*[.,;:!?-]*)\s*/ig, (m, off, src) => ctrlLooseGap(m, " ", off, src))
+    .replace(/\s*ps_summary\s*=\s*`[^`\n]{1,320}`(?:\s*[.,;:!?-]*)\s*/ig, (m, off, src) => ctrlLooseGap(m, " ", off, src))
+    .replace(/\s*\(\s*ps_state\b[\s\S]{0,720}?(?:\)|(?=\n)|$)\s*/ig, (m, off, src) => ctrlLooseGap(m, " ", off, src))
+    .replace(/\s*\(\s*ps_presence\b[\s\S]{0,120}?(?:\)|(?=\n)|$)\s*/ig, (m, off, src) => ctrlLooseGap(m, " ", off, src))
+    .replace(/\s*\(\s*ps_thread\b[\s\S]{0,560}?(?:\)|(?=\n)|$)\s*/ig, (m, off, src) => ctrlLooseGap(m, " ", off, src))
+    .replace(/\s*\(\s*ps_summary\b[\s\S]{0,360}?(?:\)|(?=\n)|$)\s*/ig, (m, off, src) => ctrlLooseGap(m, " ", off, src))
     .replace(/(^|\n)\s*ps_(?:state|presence|thread|summary)\b[^\n]{0,720}(?=\n|$)/ig, "$1")
-    .replace(/\n?\s*<PS>[\s\S]{0,1200}?(?:<\/PS>|(?=\n\s*\n)|$)\s*/gi, "\n")
-    .replace(/\n?\s*<\/?PS>\s*\n?/gi, "\n")
-    .replace(/\s*<<[\s\S]{0,240}?(?:>>|(?=\n)|$)\s*/g, " ");
+    .replace(/\n?\s*<PS>[\s\S]{0,1200}?(?:<\/PS>|(?=\n\s*\n)|$)\s*/gi, (m, off, src) => ctrlLooseGap(m, "\n", off, src))
+    .replace(/\n?\s*<\/?PS>\s*\n?/gi, (m, off, src) => ctrlLooseGap(m, "\n", off, src))
+    .replace(/\s*<<[\s\S]{0,240}?(?:>>|(?=\n)|$)\s*/g, (m, off, src) => ctrlLooseGap(m, " ", off, src));
 }
 
 function tidyVisibleText(text) {
-  return String(text || "")
+  const clean = String(text || "")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .trimStart();
+    .replace(/[ \t]{2,}/g, " ");
+
+  return clean.trim() ? clean : "";
 }
 
 function applyStateTask(ps, role, packet, turn) {
