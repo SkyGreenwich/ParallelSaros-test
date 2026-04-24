@@ -878,22 +878,23 @@ function buildCtx(text) {
   const focusNext = buildThreadField(ps, focusKey, "next");
   const otherState = buildOtherState(ps, otherKey, entering);
   const resumeLine = buildResumeLine(ps, focusKey, entering);
+  const presenceLine = ps.rt.together
+    ? 'Together: stay with ' + focusName + ' as "you"; ' + otherName + " shares the scene."
+    : "Separate: keep " + otherName + " offstage unless directly perceived here.";
   const lines = ["<SYSTEM>"].concat(buildTaskLines(ps, task, entering), buildIdentityLines(ps, focusKey, otherKey, entering), [
+    presenceLine,
+    resumeLine,
     entering
-      ? "Shift: resume " + focusName + " only; do not continue " + otherName + "."
+      ? "Shift entry: resume " + focusName + "'s thread only; do not continue " + otherName + "'s prior scene."
       : "Stay inside " + focusName + "'s local thread.",
     entering
-      ? "Open on " + focusName + "'s immediate scene or action."
+      ? "Opening rule: first story sentence starts from " + focusName + "'s immediate perception, action, or local problem."
       : "",
-    resumeLine,
     focusRole.scene || focusRole.knows || focusRole.next
       ? "Scene: " + focusScene
       : "Scene: establish a narrow local opening for " + focusName + " from direct perception only.",
     "Knows: " + focusKnows,
     "Next: " + focusNext,
-    ps.rt.together
-      ? 'Together: stay with ' + focusName + ' as "you"; ' + otherName + " shares the scene."
-      : "Separate: keep " + otherName + " offstage unless directly perceived here.",
     otherState,
     "</SYSTEM>"
   ]).filter(Boolean);
@@ -909,9 +910,15 @@ function injectNote(text) {
   const memoryText = memory ? String(text || "").slice(0, memory) : "";
   let context = memory ? String(text || "").slice(memory) : String(text || "");
   const block = buildCtx(context);
+  const ps = getPs();
 
   context = stripBlock(context);
   if (!block) {
+    return [memoryText, context].join("");
+  }
+
+  if (isEnteringTurn(ps)) {
+    context = injectShiftNote(context, block, max - memory);
     return [memoryText, context].join("");
   }
 
@@ -925,6 +932,68 @@ function injectNote(text) {
   context = lines.join("\n");
   context = context.slice(-(max - memory));
   return [memoryText, context].join("");
+}
+
+function isEnteringTurn(ps) {
+  return !!(ps && ps.rt && ps.rt.breakTurn === getTurn());
+}
+
+function injectShiftNote(context, block, room) {
+  const budget = Math.max(600, room || 0);
+  const split = splitRecentStory(context);
+  if (!split) {
+    return injectBlockAtEnd(context, block, budget);
+  }
+
+  const recentLimit = Math.max(220, Math.min(420, Math.floor(budget * 0.14)));
+  const recentTail = clipRecentStoryTail(split.recent, recentLimit);
+  const parts = [
+    split.before.trimEnd(),
+    recentTail ? recentTail : "",
+    block,
+    split.after.trimStart()
+  ].filter(Boolean);
+
+  return parts.join("\n\n").slice(-budget);
+}
+
+function injectBlockAtEnd(context, block, room) {
+  const parts = [String(context || "").trimEnd(), block].filter(Boolean);
+  return parts.join("\n\n").slice(-Math.max(600, room || 0));
+}
+
+function splitRecentStory(context) {
+  const raw = String(context || "");
+  const label = raw.match(/Recent\s*Story\s*:/i);
+  if (!label) {
+    return null;
+  }
+
+  const start = label.index || 0;
+  const bodyStart = start + label[0].length;
+  const rest = raw.slice(bodyStart);
+  const afterMatch = rest.match(/\n\s*\[\s*Author's\s*note\s*:/i);
+  const afterIndex = afterMatch ? afterMatch.index : -1;
+
+  return {
+    before: raw.slice(0, bodyStart),
+    recent: afterIndex === -1 ? rest : rest.slice(0, afterIndex),
+    after: afterIndex === -1 ? "" : rest.slice(afterIndex)
+  };
+}
+
+function clipRecentStoryTail(text, limit) {
+  const raw = stripBlock(text).trim();
+  if (!raw || raw.length <= limit) {
+    return raw;
+  }
+
+  let tail = raw.slice(raw.length - limit);
+  const cut = tail.search(/[.!?][ \t\n]+/);
+  if (cut > -1 && cut < Math.min(180, Math.floor(limit / 2))) {
+    tail = tail.slice(cut + 1);
+  }
+  return tail.trimStart();
 }
 
 function stripBlock(text) {
@@ -1034,11 +1103,17 @@ function buildTaskLines(ps, task, entering) {
   if (task === PS_TASK_STATE) {
     const focusName = getFocusName(ps, ps.rt.focus);
     const otherName = getFocusName(ps, flipFocus(ps.rt.focus));
+    if (entering) {
+      return [
+        "Task: start with `(ps_state scene=`...`; knows=`...`; next=`...`; presence=together|separate|unclear)`, then continue.",
+        'Shift task: the story continuation must land in ' + focusName + '\'s local thread. "you" = ' + focusName + ", not " + otherName + ".",
+        otherName + "-only events stay offstage unless " + focusName + " directly perceives them."
+      ];
+    }
+
     return [
       "Task: start with `(ps_state scene=`...`; knows=`...`; next=`...`; presence=together|separate|unclear)`, then continue.",
-      entering
-        ? 'Shift turn: only ' + focusName + '\'s thread. "you" = ' + focusName + ", not " + otherName + "."
-        : "Continue only the active protagonist's own local thread.",
+      "Continue only the active protagonist's own local thread.",
       "State fields stay short, factual, and dialogue-free."
     ];
   }
@@ -1728,7 +1803,7 @@ function buildResumeLine(ps, key, entering) {
     return "";
   }
 
-  return (entering ? "Resume: " : "Thread anchor: ") + clip(anchor, 160);
+  return (entering ? "Resume from prior checkpoint: " : "Thread anchor: ") + clip(anchor, entering ? 190 : 160);
 }
 
 function buildThreadFallback(ps, key, field) {
